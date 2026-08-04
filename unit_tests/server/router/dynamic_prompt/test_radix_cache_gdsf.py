@@ -170,6 +170,26 @@ def test_gdsf_never_evicts_referenced_node():
     assert tree.get_refed_tokens_num() == 10
 
 
+def test_gdsf_merge_keeps_deeper_node_frequency():
+    """merge_unreferenced_nodes collapses a parent into its single child; the
+    surviving node's frequency must reflect full-span reuse, not the ancestor's
+    (larger) count."""
+    tree = RadixCache("gdsf_merge", 100, 0, eviction_policy="gdsf")
+    _, node_a = tree.insert(_t(1, 2, 3))  # ancestor
+    _, node_b = tree.insert(_t(1, 2, 3, 4, 5))  # child extends A
+
+    _reuse(tree, _t(1, 2, 3), times=3)  # accesses only the A prefix
+    _reuse(tree, _t(1, 2, 3, 4, 5), times=1)  # accesses the full A+B span
+
+    # A freq = 1 + 3 + 1 = 5 ; B freq = 1 + 1 = 2
+    assert node_a._gdsf_freq == 5 and node_b._gdsf_freq == 2
+
+    tree.merge_unreferenced_nodes()  # A merges into B
+
+    assert tree.root_node.children[1] is node_b
+    assert node_b._gdsf_freq == 2  # deeper-node count, not 5
+
+
 def test_gdsf_bookkeeping_matches_lru():
     """Token accounting must be identical no matter the policy."""
     tree = RadixCache("gdsf_book", 100, 0, eviction_policy="gdsf")

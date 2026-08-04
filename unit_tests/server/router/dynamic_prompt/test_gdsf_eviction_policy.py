@@ -157,6 +157,38 @@ def test_gdsf_access_refreshes_clock_but_touch_does_not():
     assert node._gdsf_clock == policy.aging_clock  # genuine access refreshes it
 
 
+def test_gdsf_merge_does_not_overstate_combined_frequency():
+    """Merging an ancestor into its child yields one node spanning both. It was
+    fully reused only as often as the deeper node was reached, so the combined
+    frequency must be the min (deeper node's count), not the max (which would
+    count shorter parent-only hits as full-span reuses)."""
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
+    parent = _make_node(2)
+    child = _make_node(3)
+    policy.on_new_node(parent)
+    policy.on_new_node(child)
+    # parent (ancestor) is reached at least as often as the child
+    for _ in range(3):
+        policy.on_access(parent)  # parent freq -> 4
+    policy.on_access(child)  # child freq -> 2
+
+    policy.on_merge(parent, child)  # child survives as the merged node
+    assert child._gdsf_freq == 2  # deeper-node count, not max(4, 2)
+
+
+def test_gdsf_merge_uses_deeper_node_clock():
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
+    parent = _make_node(2)
+    child = _make_node(3)
+    policy.on_new_node(parent)
+    policy.on_new_node(child)
+    child._gdsf_clock = 1.0
+    parent._gdsf_clock = 5.0  # parent touched more recently (parent-only access)
+
+    policy.on_merge(parent, child)
+    assert child._gdsf_clock == 1.0  # full-span recency, not the parent-only 5.0
+
+
 def test_gdsf_split_inherits_history():
     """A split node carved from an existing node inherits its freq/clock."""
     policy = GDSFEvictionPolicy()
