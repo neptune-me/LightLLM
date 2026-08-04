@@ -337,6 +337,33 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     )
     parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
 
+    parser.add_argument(
+        "--radix_cache_eviction_policy",
+        type=str,
+        choices=["lru", "gdsf"],
+        default="lru",
+        help="""eviction policy for the radix prompt cache. "lru" (default) evicts the
+        least-recently-used unreferenced leaf. "gdsf" is an experimental size-aware LFU
+        (Greedy-Dual-Size-Frequency) policy that scores nodes by
+        aging_clock + freq * cost / size ** size_exponent and evicts the lowest score,
+        favoring small, frequently reused prefixes.""",
+    )
+    parser.add_argument(
+        "--radix_cache_gdsf_cost",
+        type=float,
+        default=1.0,
+        help="""GDSF only: fetch/recompute cost weight C in the priority formula. Higher
+        values weight access frequency more heavily relative to the aging term.""",
+    )
+    parser.add_argument(
+        "--radix_cache_gdsf_size_exponent",
+        type=float,
+        default=1.0,
+        help="""GDSF only: exponent applied to node size in the priority denominator.
+        1.0 is classic GDSF-Size (size-aware); 0.0 recovers a pure aged-LFU policy with
+        no size awareness.""",
+    )
+
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
     parser.add_argument("--diverse_mode", action="store_true", help="diversity generation mode")

@@ -180,6 +180,11 @@ class ModeBackend:
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
+                    eviction_policy=self.args.radix_cache_eviction_policy,
+                    eviction_policy_kwargs={
+                        "cost": self.args.radix_cache_gdsf_cost,
+                        "size_exponent": self.args.radix_cache_gdsf_size_exponent,
+                    },
                 )
 
         if "prompt_cache_kv_buffer" in model_cfg:
