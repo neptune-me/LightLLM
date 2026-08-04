@@ -455,6 +455,17 @@ class LinearAttPagedRadixCache:
         if len(ans_node_list) == 0:
             return None, 0, None
 
+        # Record hits only for usable prefix — misses (including
+        # trimmed small-page tails without buffer) must not inflate
+        # GDSF frequency. Helper intentionally does not bump hits.
+        if self._is_gdsf_like() and update_refs:
+            for n in ans_node_list:
+                if n is self.root_node:
+                    continue
+                self._discard_node(n)
+                self._record_hit(n)
+                self._add_node(n)
+
         ans_node = ans_node_list[-1]
         mem_value = torch.concat([e.token_mem_index_value for e in ans_node_list])
         assert len(mem_value) == ans_node.node_prefix_total_len
@@ -471,8 +482,6 @@ class LinearAttPagedRadixCache:
     ):
         self._discard_node(node)
         node.update_time()
-        if self._is_gdsf_like() and update_refs and node is not self.root_node:
-            self._record_hit(node)
 
         try:
             if update_refs:
