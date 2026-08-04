@@ -902,6 +902,40 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         default=False,
         help="Enable returning routed expert indices for MoE models (R3 feature).",
     )
+    # ---- Experimental GDSF-style size-aware LFU eviction for GPU radix prompt cache ----
+    parser.add_argument(
+        "--radix_cache_eviction_policy",
+        type=str,
+        choices=["lru", "gdsf", "lfu"],
+        default="lru",
+        help="""[Experimental] Eviction policy for the GPU radix prompt cache.
+                lru  : Least Recently Used (default, preserves current behavior).
+                gdsf : GreedyDual-Size-Frequency inspired size-aware LFU (clock + freq/size).
+                lfu  : Pure Least Frequently Used (alias for gdsf without clock aging).
+                Configurable via CLI or env var LIGHTLLM_RADIX_CACHE_EVICTION_POLICY.
+                See lightllm/server/router/dynamic_prompt/radix_cache.py for details.""" ,
+    )
+    parser.add_argument(
+        "--radix_cache_gdsf_alpha",
+        type=float,
+        default=1.0,
+        help="""[Experimental] Weight applied to frequency in GDSF score: priority = clock + alpha * freq / size.
+                Larger alpha amplifies LFU effect; 0 degenerates to FIFO/clock. Only used when
+                --radix_cache_eviction_policy=gdsf. Also configurable via env var LIGHTLLM_RADIX_CACHE_GDSF_ALPHA.""" ,
+    )
+    parser.add_argument(
+        "--radix_cache_gdsf_enable_size_aware",
+        action="store_true",
+        default=True,
+        help="""[Experimental] Enable size-aware denominator in GDSF (freq/size). When disabled, priority = clock + alpha * freq.
+                This flag is deprecated — use --no_radix_cache_gdsf_enable_size_aware to disable; default is enabled.""" ,
+    )
+    parser.add_argument(
+        "--no_radix_cache_gdsf_enable_size_aware",
+        action="store_true",
+        default=False,
+        help="""[Experimental] Disable size-aware denominator (use freq only).""" ,
+    )
     parser.add_argument(
         "--enable_profiling",
         type=str,

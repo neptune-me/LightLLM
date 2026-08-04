@@ -231,3 +231,14 @@ class StartArgs:
     disable_linear_att_small_page_cpu_cache: bool = field(default=False)
     linear_att_cache_size: Optional[int] = field(default=None)
     linear_att_ssm_data_type: Optional[str] = field(default="float32", metadata={"choices": ["bfloat16", "float32"]})
+
+    # ---- Experimental GDSF-style size-aware LFU eviction for GPU radix prompt cache ----
+    # Default "lru" preserves the existing behavior; "gdsf" enables the GreedyDual-Size-
+    # Frequency inspired policy (clock + freq/size).  Marked experimental and
+    # configurable via CLI / env var.
+    radix_cache_eviction_policy: str = field(
+        default="lru", metadata={"choices": ["lru", "gdsf", "lfu"]}
+    )
+    radix_cache_gdsf_alpha: float = field(default=1.0)
+    radix_cache_gdsf_enable_size_aware: bool = field(default=True)
+    no_radix_cache_gdsf_enable_size_aware: bool = field(default=False)

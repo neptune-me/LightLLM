@@ -175,11 +175,20 @@ class ModeBackend:
                     linear_att_small_page_buffers=self.linear_att_cache_manager,
                 )
             else:
+                # Resolve experimental GDSF config: CLI args take precedence, but RadixCache
+                # also respects env vars for live experiments without restart.
+                _no_size_aware = getattr(self.args, "no_radix_cache_gdsf_enable_size_aware", False)
+                _size_aware = getattr(self.args, "radix_cache_gdsf_enable_size_aware", True)
+                if _no_size_aware:
+                    _size_aware = False
                 self.radix_cache = RadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
+                    eviction_policy=getattr(self.args, "radix_cache_eviction_policy", "lru"),
+                    gdsf_alpha=getattr(self.args, "radix_cache_gdsf_alpha", 1.0),
+                    enable_size_aware=_size_aware,
                 )
 
         if "prompt_cache_kv_buffer" in model_cfg:
