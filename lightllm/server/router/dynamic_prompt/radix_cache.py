@@ -170,11 +170,13 @@ def _resolve_gdsf_config(eviction_policy=None, gdsf_alpha=None, enable_size_awar
             pass
 
     # 3) env vars (for experiments without restarting StartArgs)
-    env_policy = os.getenv("LIGHTLLM_RADIX_CACHE_EVICTION_POLICY", "").strip().lower()
-    if env_policy in ("lru", "gdsf", "lfu"):
-        policy = env_policy
-    elif os.getenv("LIGHTLLM_ENABLE_GDSF", "").upper() in ("1", "TRUE", "ON"):
-        policy = "gdsf"
+    # Only apply if not already resolved from explicit/StartArgs (respect priority)
+    if policy is None:
+        env_policy = os.getenv("LIGHTLLM_RADIX_CACHE_EVICTION_POLICY", "").strip().lower()
+        if env_policy in ("lru", "gdsf", "lfu"):
+            policy = env_policy
+        elif os.getenv("LIGHTLLM_ENABLE_GDSF", "").upper() in ("1", "TRUE", "ON"):
+            policy = "gdsf"
 
     if alpha is None:
         env_alpha = os.getenv("LIGHTLLM_RADIX_CACHE_GDSF_ALPHA", "").strip()
