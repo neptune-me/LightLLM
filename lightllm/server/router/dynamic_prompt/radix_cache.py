@@ -658,13 +658,15 @@ class RadixCache:
             [parent_node.token_mem_index_value, child_node.token_mem_index_value]
         )
         child_node.node_value_len = len(child_node.token_mem_index_value)
-        # keep max recency and max freq, recompute priority with new size
+        # keep max recency, keep child's frequency for merged prefix
         child_node.time_id = max(parent_node.time_id, child_node.time_id)
         if self._is_gdsf_like():
-            child_node.hit_count = max(parent_node.hit_count, child_node.hit_count)
-            # if both zero, keep 1 as minimal to avoid zero freq
+            # merged node represents full combined prefix, whose reuse is
+            # exactly that of the former leaf (child). Parent may have extra
+            # hits to shorter prefix alone, so taking max overestimates.
+            # Keep child's hit_count; only inherit if child's is 0.
             if child_node.hit_count == 0:
-                child_node.hit_count = 1
+                child_node.hit_count = max(1, parent_node.hit_count)
             self._compute_priority(child_node)
 
         grandparent_node = parent_node.parent
