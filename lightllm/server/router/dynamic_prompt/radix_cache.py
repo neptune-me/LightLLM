@@ -447,15 +447,9 @@ class RadixCache:
                     self.evict_tree_set.add(child)
                 return prefix_len, new_node
             elif prefix_len < len(key) and prefix_len == len(child.token_id_key):
-                if self._is_gdsf_like():
-                    was_leaf = child.is_leaf()
-                    if was_leaf:
-                        self.evict_tree_set.discard(child)
-                    self._record_hit(child)
-                    # leaf will become internal after new child is added in next
-                    # iteration, so keep it discarded (do not re-add). Internal
-                    # nodes are not in evict_tree_set. This discard-before-mutate
-                    # prevents SortedSet corruption (priority is part of key).
+                # reuse already counted in match_prefix(update_refs=True) for
+                # same request; do not double-count here. Next iteration will
+                # handle leaf discard before new child creation.
                 return (prefix_len, child, key[prefix_len:], value[prefix_len:])
             else:
                 assert False, "can not run to here"
