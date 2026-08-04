@@ -394,8 +394,6 @@ class RadixCache:
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
                     child.update_time()
-                    if self._is_gdsf_like():
-                        self._record_hit(child)
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
                     return prefix_len, child
@@ -406,8 +404,6 @@ class RadixCache:
                     split_parent_node = child.split_node(prefix_len)
                     if self._is_gdsf_like():
                         self._refresh_priority_for_split(split_parent_node, child)
-                        # this insert hits the newly exposed prefix
-                        self._record_hit(split_parent_node)
                     split_parent_node.update_time()
                     child.update_time()
 
@@ -429,8 +425,6 @@ class RadixCache:
                 split_parent_node = child.split_node(prefix_len)
                 if self._is_gdsf_like():
                     self._refresh_priority_for_split(split_parent_node, child)
-                    # the common prefix was traversed (hit), bump it once
-                    self._record_hit(split_parent_node)
                 split_parent_node.update_time()
                 child.update_time()
 
