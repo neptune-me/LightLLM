@@ -164,6 +164,12 @@ class ModeBackend:
         if not self.use_dynamic_prompt_cache:
             self.radix_cache = None
         else:
+            _no_size_aware = getattr(self.args, "no_radix_cache_gdsf_enable_size_aware", False)
+            _size_aware = getattr(self.args, "radix_cache_gdsf_enable_size_aware", True)
+            if _no_size_aware:
+                _size_aware = False
+            _evict_policy = getattr(self.args, "radix_cache_eviction_policy", "lru")
+            _gdsf_alpha = getattr(self.args, "radix_cache_gdsf_alpha", 1.0)
             if self.is_linear_att_mixed_model:
                 self.radix_cache = LinearAttPagedRadixCache(
                     unique_name=get_unique_server_name(),
@@ -173,21 +179,18 @@ class ModeBackend:
                     big_page_num=self.args.linear_att_page_block_num,
                     kv_cache_mem_manager=self.model.mem_manager,
                     linear_att_small_page_buffers=self.linear_att_cache_manager,
+                    eviction_policy=_evict_policy,
+                    gdsf_alpha=_gdsf_alpha,
+                    enable_size_aware=_size_aware,
                 )
             else:
-                # Resolve experimental GDSF config: CLI args take precedence, but RadixCache
-                # also respects env vars for live experiments without restart.
-                _no_size_aware = getattr(self.args, "no_radix_cache_gdsf_enable_size_aware", False)
-                _size_aware = getattr(self.args, "radix_cache_gdsf_enable_size_aware", True)
-                if _no_size_aware:
-                    _size_aware = False
                 self.radix_cache = RadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
-                    eviction_policy=getattr(self.args, "radix_cache_eviction_policy", "lru"),
-                    gdsf_alpha=getattr(self.args, "radix_cache_gdsf_alpha", 1.0),
+                    eviction_policy=_evict_policy,
+                    gdsf_alpha=_gdsf_alpha,
                     enable_size_aware=_size_aware,
                 )
 

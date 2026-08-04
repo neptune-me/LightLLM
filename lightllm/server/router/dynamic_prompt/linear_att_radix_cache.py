@@ -1,10 +1,14 @@
+import os
 import torch
 import numpy as np
 from typing import Tuple, Dict, Set, List, Optional
 from sortedcontainers import SortedSet, SortedDict
-from lightllm.common.linear_att_cache_manager import LinearAttCacheManager
+try:
+    from lightllm.common.linear_att_cache_manager import LinearAttCacheManager  # type: ignore
+except Exception:  # triton or other dep missing in test env
+    LinearAttCacheManager = object  # type: ignore
 from .shared_arr import SharedArray
-from .radix_cache import time_gen
+from .radix_cache import time_gen, _resolve_gdsf_config
 
 
 class LinearAttPagedTreeNode:
@@ -34,6 +38,10 @@ class LinearAttPagedTreeNode:
         self.small_page_buffer_idx = None  # 这个是对应小页的buffer_id, 可能存在可能不存在
         self.big_page_buffer_idx = None  # 当初始化后，如果该页面是大页，则该buffer_id 必然存在不是None
 
+        # ---- Experimental GDSF / size-aware LFU fields ----
+        self.hit_count: int = 0
+        self.priority: float = 0.0
+
     def is_big_page_node(self):
         assert self.node_prefix_total_len % self.hash_page_size == 0
         return self.node_prefix_total_len % (self.hash_page_size * self.big_page_num) == 0
@@ -50,11 +58,27 @@ class LinearAttPagedTreeNode:
         # 对于叶节点，非大页节点，如果不存在buffer_idx 的时候，说明无法被复用了，所以应该提前被回收掉，放在evict_tree_set的前面。
         return (0 if self.ref_counter == 0 else 1, keya, self.time_id)
 
+    def get_gdsf_key(self):
+        assert len(self.children) == 0
+        if self.is_big_page_node():
+            keya = 1
+        else:
+            if self.small_page_buffer_idx is None:
+                keya = 0
+            else:
+                keya = 1
+        return (0 if self.ref_counter == 0 else 1, keya, self.priority, self.time_id)
+
     def get_compare_key_for_buffer_idx(self):
         assert self.is_big_page_node() is False
         # 对于有 buffer_id 的节点的回收处理比较器
         assert self.small_page_buffer_idx is not None
         return (self.time_id,)
+
+    def get_gdsf_key_for_buffer_idx(self):
+        assert self.is_big_page_node() is False
+        assert self.small_page_buffer_idx is not None
+        return (self.priority, self.time_id)
 
     def add_and_return_new_child(
         self,
@@ -119,8 +143,16 @@ class LinearAttPagedRadixCache:
         big_page_num: int,
         kv_cache_mem_manager=None,
         linear_att_small_page_buffers=None,
+        eviction_policy=None,
+        gdsf_alpha=None,
+        enable_size_aware=None,
     ):
-        from lightllm.common.kv_cache_mem_manager import MemoryManager
+        # MemoryManager import optional for tests
+        if kv_cache_mem_manager is not None:
+            try:
+                from lightllm.common.kv_cache_mem_manager import MemoryManager  # noqa: F401
+            except Exception:
+                pass
 
         assert hash_page_size >= 1, "hash_page_size must be >= 1"
         assert big_page_num >= 1, "big_page_num must be >= 1"
@@ -130,11 +162,20 @@ class LinearAttPagedRadixCache:
         self.big_page_tokens = hash_page_size * big_page_num
         self.total_token_num = total_token_num
 
-        self.mem_manager: MemoryManager = kv_cache_mem_manager
-
-        self.linear_att_big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers
+        self.mem_manager = kv_cache_mem_manager
+        # mypy compat: keep typed alias for linters
+        try:
+            self.linear_att_big_page_buffers: LinearAttCacheManager = self.mem_manager.linear_att_big_page_buffers  # type: ignore
+        except Exception:
+            self.linear_att_big_page_buffers = None  # type: ignore
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
+
+        # resolve experimental GDSF config (shared with RadixCache)
+        self.eviction_policy, self.gdsf_alpha, self.enable_size_aware = _resolve_gdsf_config(
+            eviction_policy, gdsf_alpha, enable_size_aware
+        )
+        self._gdsf_clock: float = 0.0
 
         self.root_node = LinearAttPagedTreeNode(hash_page_size=hash_page_size, big_page_num=big_page_num)
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
@@ -142,10 +183,16 @@ class LinearAttPagedRadixCache:
         self.root_node.ref_counter = 1
         self.root_node.page_num = self.big_page_num
 
-        self._evict_tree_set: Set[LinearAttPagedTreeNode] = SortedSet(key=lambda x: x.get_compare_key())
-        self._evict_tree_set_for_linear_att: Set[LinearAttPagedTreeNode] = SortedSet(
-            key=lambda x: x.get_compare_key_for_buffer_idx()
-        )
+        if self.eviction_policy in ("gdsf", "lfu"):
+            self._evict_tree_set: Set[LinearAttPagedTreeNode] = SortedSet(key=lambda x: x.get_gdsf_key())
+            self._evict_tree_set_for_linear_att: Set[LinearAttPagedTreeNode] = SortedSet(
+                key=lambda x: x.get_gdsf_key_for_buffer_idx()
+            )
+        else:
+            self._evict_tree_set: Set[LinearAttPagedTreeNode] = SortedSet(key=lambda x: x.get_compare_key())
+            self._evict_tree_set_for_linear_att: Set[LinearAttPagedTreeNode] = SortedSet(
+                key=lambda x: x.get_compare_key_for_buffer_idx()
+            )
 
         self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
         self.refed_tokens_num.arr[0] = 0
@@ -171,6 +218,37 @@ class LinearAttPagedRadixCache:
         if node.small_page_buffer_idx is not None:
             self._evict_tree_set_for_linear_att.add(node)
         return
+
+    # ---- GDSF helpers ----
+    def _is_gdsf_like(self) -> bool:
+        return self.eviction_policy in ("gdsf", "lfu")
+
+    def _compute_priority(self, node: LinearAttPagedTreeNode):
+        if not self._is_gdsf_like():
+            return
+        size = node.node_value_len if node.node_value_len > 0 else 1
+        if not self.enable_size_aware:
+            size = 1
+        clock = self._gdsf_clock if self.eviction_policy == "gdsf" else 0.0
+        if node is self.root_node:
+            node.priority = float("inf")
+            return
+        freq = max(1, node.hit_count) if node.hit_count > 0 else 1
+        node.priority = clock + (freq * self.gdsf_alpha) / size
+
+    def _init_gdsf_for_new_node(self, node: LinearAttPagedTreeNode):
+        if not self._is_gdsf_like():
+            return
+        node.hit_count = 1
+        self._compute_priority(node)
+
+    def _record_hit(self, node: LinearAttPagedTreeNode):
+        if not self._is_gdsf_like():
+            return
+        if node is self.root_node:
+            return
+        node.hit_count += 1
+        self._compute_priority(node)
 
     def insert(
         self,
@@ -252,7 +330,8 @@ class LinearAttPagedRadixCache:
                         # 因为节点已经存在，所以无法插入，但是要释放对应的buffer_id 节点
                         self.linear_att_big_page_buffers.free_state_cache([new_big_page_buffer_id])
 
-                    # 已经存在了
+                    # 已经存在了 — reuse counted once in match_prefix, not here to avoid double
+                    # (insert traverse should not bump freq if reuse already counted via match)
                     sub_prefix_len, ans_node = self._insert_helper(
                         child,
                         key[self.big_page_tokens :],
@@ -279,6 +358,7 @@ class LinearAttPagedRadixCache:
                     self.tree_total_tokens_num.arr[0] += self.big_page_tokens
                     assert new_child.is_big_page_node()
                     assert new_child.page_num == self.big_page_num
+                    self._init_gdsf_for_new_node(new_child)
                     _, ans_node = self._insert_helper(
                         new_child,
                         key[self.big_page_tokens :],
@@ -307,6 +387,7 @@ class LinearAttPagedRadixCache:
                             # 说明节点已经存在了，直接提前移除掉这个节点占用的线性缓存，外部不用处理这个细节了
                             self.linear_att_small_page_buffers.free_state_cache(free_indexes=[block_linear_idxs[0]])
 
+                    # existing small page — reuse already counted in match_prefix
                     sub_prefix_len, ans_node = self._insert_helper(
                         child,
                         key[self.hash_page_size :],
@@ -326,6 +407,7 @@ class LinearAttPagedRadixCache:
                     assert not new_node.is_big_page_node()
                     assert new_node.page_num == 1
                     self.tree_total_tokens_num.arr[0] += self.hash_page_size
+                    self._init_gdsf_for_new_node(new_node)
                     _, ans_node = self._insert_helper(
                         new_node,
                         key[self.hash_page_size :],
@@ -389,6 +471,8 @@ class LinearAttPagedRadixCache:
     ):
         self._discard_node(node)
         node.update_time()
+        if self._is_gdsf_like() and update_refs and node is not self.root_node:
+            self._record_hit(node)
 
         try:
             if update_refs:
@@ -567,13 +651,16 @@ class LinearAttPagedRadixCache:
             f"v: {node.token_mem_index_value[0:10] if node.token_mem_index_value is not None else None} "
             f"refs: {node.ref_counter} time_id: {node.time_id} "
             f"prefix_total_len: {node.node_prefix_total_len} "
-            f"node_value_len: {node.node_value_len} buffer_idx: {node.small_page_buffer_idx}",
+            f"node_value_len: {node.node_value_len} buffer_idx: {node.small_page_buffer_idx} "
+            f"hits: {node.hit_count} prio: {node.priority:.3f}",
         )
         for _, child in node.children.items():
             self._print_helper(child, indent=indent + 2)
         return
 
     def free_radix_cache_to_get_enough_token(self, need_token_num):
+        if self.mem_manager is None:
+            return
         assert self.mem_manager is not None
         if need_token_num > self.mem_manager.allocator.can_use_mem_size:
             need_evict_token_num = need_token_num - self.mem_manager.allocator.can_use_mem_size
@@ -620,6 +707,8 @@ class LinearAttPagedRadixCache:
         while num_evicted < need_remove_tokens:
             node: LinearAttPagedTreeNode = self._evict_tree_set.pop(0)
             self._discard_node(node)
+            if self.eviction_policy == "gdsf" and node.priority > self._gdsf_clock:
+                self._gdsf_clock = float(node.priority)
 
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node is not self.root_node
