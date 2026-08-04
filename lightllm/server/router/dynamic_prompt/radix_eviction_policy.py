@@ -71,22 +71,26 @@ class GDSFEvictionPolicy(EvictionPolicy):
     Each node stores a *frozen* access clock (``_gdsf_clock``) captured at its
     last access and an access frequency (``_gdsf_freq``). Its priority is::
 
-        priority = _gdsf_clock + _gdsf_freq * cost / size ** size_exponent
+        priority = _gdsf_clock + _gdsf_freq / size ** size_exponent
 
     where ``size`` is the number of tokens the node holds. The global
     ``aging_clock`` is bumped to the priority of every evicted node, so newly
     created / reaccessed nodes inherit a rising floor (classic GDSF inflation)
     that prevents stale-but-once-hot prefixes from polluting the cache forever.
 
-    Tunables (all keep the policy well-defined):
+    Tunable:
 
-    * ``cost`` - fetch/recompute cost weight ``C`` (default 1.0).
     * ``size_exponent`` - ``0`` recovers pure aged-LFU (no size awareness),
       ``1`` is classic GDSF-Size (default 1.0).
+
+    Note: classic GDSF also carries a per-object fetch cost ``C(i)``. A *global*
+    constant cost is deliberately omitted because it rescales every node's
+    priority uniformly and therefore cannot change eviction ordering; the only
+    size-relevant per-node signal here is ``size`` itself, controlled by
+    ``size_exponent``.
     """
 
-    def __init__(self, cost: float = 1.0, size_exponent: float = 1.0):
-        self.cost = float(cost)
+    def __init__(self, size_exponent: float = 1.0):
         self.size_exponent = float(size_exponent)
         self.aging_clock = 0.0
 
@@ -99,7 +103,7 @@ class GDSFEvictionPolicy(EvictionPolicy):
 
     def priority(self, node: "TreeNode") -> float:
         size = self._size(node)
-        return node._gdsf_clock + node._gdsf_freq * self.cost / (size ** self.size_exponent)
+        return node._gdsf_clock + node._gdsf_freq / (size ** self.size_exponent)
 
     def compare_key(self, node: "TreeNode") -> Tuple:
         # keep the structural (ref, children) prefix; final time_id breaks ties
@@ -148,7 +152,7 @@ _POLICIES = {
 def create_eviction_policy(name: str = "lru", **kwargs) -> EvictionPolicy:
     """Build an eviction policy by name.
 
-    ``lru`` ignores kwargs; ``gdsf`` accepts ``cost`` and ``size_exponent``.
+    ``lru`` ignores kwargs; ``gdsf`` accepts ``size_exponent``.
     """
     name = (name or "lru").lower()
     if name not in _POLICIES:

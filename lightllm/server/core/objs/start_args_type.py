@@ -97,7 +97,6 @@ class StartArgs:
     enable_prefill_decode_mixed: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
     radix_cache_eviction_policy: str = field(default="lru")
-    radix_cache_gdsf_cost: float = field(default=1.0)
     radix_cache_gdsf_size_exponent: float = field(default=1.0)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)

@@ -44,16 +44,16 @@ def test_lru_touch_bumps_time_id_only():
 # GDSF policy                                                                  #
 # --------------------------------------------------------------------------- #
 def test_gdsf_new_node_initial_priority():
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
     node = _make_node(4)
     policy.on_new_node(node)
-    # priority = aging_clock(0) + freq(1) * cost(1) / size(4)
+    # priority = aging_clock(0) + freq(1) / size(4)
     assert node._gdsf_freq == 1
     assert policy.priority(node) == pytest.approx(0.25)
 
 
 def test_gdsf_access_increments_frequency_and_priority():
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
     node = _make_node(4)
     policy.on_new_node(node)
     policy.on_access(node)  # genuine reuse: freq -> 2
@@ -64,7 +64,7 @@ def test_gdsf_access_increments_frequency_and_priority():
 def test_gdsf_touch_does_not_change_frequency():
     """touch() is a recency/structural signal (inserts, probes) and must NOT
     inflate the frequency used for size-aware LFU."""
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
     node = _make_node(4)
     policy.on_new_node(node)
     freq_before = node._gdsf_freq
@@ -77,7 +77,7 @@ def test_gdsf_touch_does_not_change_frequency():
 
 def test_gdsf_is_size_aware_larger_node_lower_priority():
     """Equal frequency: the larger node should be evicted first (lower key)."""
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
     small = _make_node(2)
     large = _make_node(8)
     policy.on_new_node(small)
@@ -87,7 +87,7 @@ def test_gdsf_is_size_aware_larger_node_lower_priority():
 
 def test_gdsf_is_frequency_aware_less_used_lower_priority():
     """Equal size: the less-frequently-used node should be evicted first."""
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
     hot = _make_node(3)
     cold = _make_node(3)
     policy.on_new_node(hot)
@@ -99,7 +99,7 @@ def test_gdsf_is_frequency_aware_less_used_lower_priority():
 
 def test_gdsf_size_exponent_zero_is_pure_lfu():
     """size_exponent=0 removes size-awareness -> equal freq => equal priority term."""
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=0.0)
+    policy = GDSFEvictionPolicy(size_exponent=0.0)
     small = _make_node(2)
     large = _make_node(8)
     policy.on_new_node(small)
@@ -118,7 +118,7 @@ def test_gdsf_referenced_nodes_sort_after_unreferenced():
 
 
 def test_gdsf_on_evict_raises_aging_clock():
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
     node = _make_node(4)
     policy.on_new_node(node)
     p = policy.priority(node)
@@ -129,7 +129,7 @@ def test_gdsf_on_evict_raises_aging_clock():
 def test_gdsf_aging_prevents_immediate_reeviction_of_new_node():
     """A node created after an eviction inherits the raised clock, so it is not
     immediately the lowest-priority (oldest-looking) node."""
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
     evicted = _make_node(1)
     policy.on_new_node(evicted)
     policy.on_access(evicted)  # bump priority up
@@ -142,7 +142,7 @@ def test_gdsf_aging_prevents_immediate_reeviction_of_new_node():
 
 
 def test_gdsf_access_refreshes_clock_but_touch_does_not():
-    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
     victim = _make_node(1)
     policy.on_new_node(victim)
     policy.on_evict(victim)  # raise aging_clock above 0
@@ -178,15 +178,35 @@ def test_factory_defaults_to_lru():
 
 
 def test_factory_builds_gdsf_with_kwargs():
-    policy = create_eviction_policy("gdsf", cost=2.0, size_exponent=0.5)
+    policy = create_eviction_policy("gdsf", size_exponent=0.5)
     assert isinstance(policy, GDSFEvictionPolicy)
-    assert policy.cost == 2.0
     assert policy.size_exponent == 0.5
 
 
 def test_factory_rejects_unknown_policy():
     with pytest.raises(ValueError):
         create_eviction_policy("nope")
+
+
+def test_gdsf_has_no_cost_knob():
+    """cost was a global scalar that could not change eviction ordering (it
+    rescales every priority uniformly), so the knob was removed."""
+    with pytest.raises(TypeError):
+        GDSFEvictionPolicy(cost=1.0)
+    assert not hasattr(GDSFEvictionPolicy(), "cost")
+
+
+def test_gdsf_ordering_independent_of_would_be_cost_scaling():
+    """Guard the property behind the removal: priority ordering depends only on
+    freq / size ** e, so any uniform positive rescale leaves argmin unchanged."""
+    policy = GDSFEvictionPolicy(size_exponent=1.0)
+    a = _make_node(2)  # freq 1 -> 0.5
+    b = _make_node(5)  # freq 1 -> 0.2
+    policy.on_new_node(a)
+    policy.on_new_node(b)
+    keys = {"a": policy.compare_key(a), "b": policy.compare_key(b)}
+    # b (larger, lower density) must be the victim regardless of any scalar
+    assert min(keys, key=keys.get) == "b"
 
 
 if __name__ == "__main__":

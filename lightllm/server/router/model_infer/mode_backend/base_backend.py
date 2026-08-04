@@ -188,7 +188,6 @@ class ModeBackend:
                     mem_manager=self.model.mem_manager,
                     eviction_policy=self.args.radix_cache_eviction_policy,
                     eviction_policy_kwargs={
-                        "cost": self.args.radix_cache_gdsf_cost,
                         "size_exponent": self.args.radix_cache_gdsf_size_exponent,
                     },
                 )
