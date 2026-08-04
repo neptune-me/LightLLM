@@ -99,6 +99,44 @@ def test_gdsf_frequency_ignores_readonly_probes():
     assert _present(tree, _t(20, 21, 22))  # genuinely-reused B survives
 
 
+def test_gdsf_partial_prefix_hit_credits_frequency():
+    """A genuine reuse that only matches part of a node (forcing a split) must
+    credit the matched head node's frequency, not silently drop it."""
+    tree = RadixCache("gdsf_partial", 100, 0, eviction_policy="gdsf")
+    tree.insert(_t(10, 11, 12, 13, 14, 15))  # single node, freq seeded to 1
+
+    # partial match of the first 3 tokens: splits into head [10,11,12] + tail
+    node, size, _ = tree.match_prefix(_t(10, 11, 12), update_refs=True)
+    tree.dec_node_ref_counter(node)
+
+    assert size == 3
+    # inherited freq (1) from the original node + 1 for this genuine access
+    assert node._gdsf_freq == 2
+
+
+def test_gdsf_partial_hit_credit_changes_eviction_outcome():
+    """Discriminating end-to-end: a SINGLE partial-prefix reuse is the head's
+    only access. Sizes are chosen so the head survives a cold peer iff that one
+    partial hit was credited (freq 2 vs 1). Without the credit the head loses.
+    """
+    tree = RadixCache("gdsf_partial_evict", 100, 0, eviction_policy="gdsf")
+    tree.insert(_t(10, 11, 12, 13, 14, 15))  # A -> head[10,11,12](sz3) + tail(sz3)
+    tree.insert(_t(90, 91))  # C, cold peer, size 2
+
+    _reuse(tree, _t(10, 11, 12), times=1)  # one partial hit -> head freq should be 2
+
+    # cold tail (p=1/3) is the lowest, evict it; head becomes a leaf
+    tree.evict(3, lambda x: x)
+    assert not _present(tree, _t(10, 11, 12, 13, 14, 15))
+    assert _present(tree, _t(10, 11, 12))
+
+    # head(sz3,freq2 -> p=0.67) vs C(sz2,freq1 -> p=0.5): the cold peer must go.
+    # (If the partial hit were dropped, head would be p=1/3<0.5 and lose.)
+    tree.evict(2, lambda x: x)
+    assert _present(tree, _t(10, 11, 12))
+    assert not _present(tree, _t(90, 91))
+
+
 def test_gdsf_frequency_ignores_reinsertions():
     """Re-inserting the same prefix must NOT inflate its frequency."""
     tree = RadixCache("gdsf_reinsert", 100, 0, eviction_policy="gdsf")

@@ -339,6 +339,9 @@ class RadixCache:
                     # from 0 to 1 need update refs token num
                     if split_parent_node.ref_counter == 1:
                         self.refed_tokens_num.arr[0] += len(split_parent_node.token_mem_index_value)
+                    # a partial-prefix hit terminates on the split node, which is
+                    # never seen by the touch loop; credit its genuine reuse here.
+                    self._evict_policy.on_access(split_parent_node)
 
                 if child.is_leaf():
                     self.evict_tree_set.add(child)
