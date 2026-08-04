@@ -165,6 +165,12 @@ class ModeBackend:
             self.radix_cache = None
         else:
             if self.is_linear_att_mixed_model:
+                if self.args.radix_cache_eviction_policy != "lru":
+                    self.logger.warning(
+                        f"radix_cache_eviction_policy={self.args.radix_cache_eviction_policy!r} is not supported "
+                        f"for linear-attention (mamba mixed) models; LinearAttPagedRadixCache uses LRU eviction. "
+                        f"Falling back to LRU."
+                    )
                 self.radix_cache = LinearAttPagedRadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,

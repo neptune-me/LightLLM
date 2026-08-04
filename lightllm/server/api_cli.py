@@ -346,7 +346,9 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         least-recently-used unreferenced leaf. "gdsf" is an experimental size-aware LFU
         (Greedy-Dual-Size-Frequency) policy that scores nodes by
         aging_clock + freq * cost / size ** size_exponent and evicts the lowest score,
-        favoring small, frequently reused prefixes.""",
+        favoring small, frequently reused prefixes. Only applies to the standard radix
+        cache; linear-attention (mamba mixed) models always use LRU and will warn if a
+        different policy is requested.""",
     )
     parser.add_argument(
         "--radix_cache_gdsf_cost",
