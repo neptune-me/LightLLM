@@ -294,6 +294,9 @@ class RadixCache:
         while len(update_list) != 0:
             cur_node: TreeNode = update_list.pop()
             self._evict_policy.touch(cur_node)
+            # frequency is only credited for genuine reuse, not read-only probes
+            if update_refs:
+                self._evict_policy.on_access(cur_node)
             if cur_node.is_leaf():
                 self.evict_tree_set.add(cur_node)
 

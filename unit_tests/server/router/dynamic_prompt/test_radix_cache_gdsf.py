@@ -19,6 +19,13 @@ def _present(tree, key):
     return node is not None and size == len(key)
 
 
+def _reuse(tree, key, times=1):
+    """Simulate `times` genuine reuses (a request pins the prefix then releases)."""
+    for _ in range(times):
+        node, _, _ = tree.match_prefix(key, update_refs=True)
+        tree.dec_node_ref_counter(node)
+
+
 # --------------------------------------------------------------------------- #
 # Backward compatibility: default is still LRU                                 #
 # --------------------------------------------------------------------------- #
@@ -62,9 +69,8 @@ def test_gdsf_keeps_frequently_used_prefix():
     tree.insert(_t(10, 11, 12))  # A
     tree.insert(_t(20, 21, 22))  # B, same size
 
-    for _ in range(5):
-        tree.match_prefix(_t(10, 11, 12), update_refs=False)  # heat up A
-    tree.match_prefix(_t(20, 21, 22), update_refs=False)  # touch B once
+    _reuse(tree, _t(10, 11, 12), times=5)  # genuinely reuse A
+    _reuse(tree, _t(20, 21, 22), times=1)  # reuse B once
 
     tree.evict(1, lambda x: x)
 
@@ -72,19 +78,40 @@ def test_gdsf_keeps_frequently_used_prefix():
     assert not _present(tree, _t(20, 21))  # cold B evicted
 
 
-def test_lru_evicts_hot_prefix_when_cold_touched_last():
-    """LRU contrast: A is heated first, B touched last -> LRU evicts A."""
-    tree = RadixCache("lru_freq", 100, 0, eviction_policy="lru")
-    tree.insert(_t(10, 11, 12))
-    tree.insert(_t(20, 21, 22))
+def test_gdsf_frequency_ignores_readonly_probes():
+    """Read-only probes (update_refs=False) must NOT raise a node's frequency.
 
-    for _ in range(5):
-        tree.match_prefix(_t(10, 11, 12), update_refs=False)
-    tree.match_prefix(_t(20, 21, 22), update_refs=False)
+    Discriminating case: B is genuinely reused once (freq 2) and A is only
+    probed heavily (freq stays 1). If probes counted, A's frequency would
+    dwarf B's and B would be evicted; instead A must be the victim.
+    """
+    tree = RadixCache("gdsf_probe", 100, 0, eviction_policy="gdsf")
+    tree.insert(_t(10, 11, 12))  # A
+    tree.insert(_t(20, 21, 22))  # B, same size
+
+    _reuse(tree, _t(20, 21, 22), times=1)  # B: real reuse -> freq 2
+    for _ in range(10):
+        tree.match_prefix(_t(10, 11, 12), update_refs=False)  # A: probes only
 
     tree.evict(1, lambda x: x)
 
-    assert not _present(tree, _t(10, 11, 12))  # A evicted (oldest touch)
+    assert not _present(tree, _t(10, 11, 12))  # A evicted despite heavy probing
+    assert _present(tree, _t(20, 21, 22))  # genuinely-reused B survives
+
+
+def test_gdsf_frequency_ignores_reinsertions():
+    """Re-inserting the same prefix must NOT inflate its frequency."""
+    tree = RadixCache("gdsf_reinsert", 100, 0, eviction_policy="gdsf")
+    tree.insert(_t(10, 11, 12))  # A
+    tree.insert(_t(20, 21, 22))  # B, same size
+
+    _reuse(tree, _t(20, 21, 22), times=1)  # B: real reuse -> freq 2
+    for _ in range(10):
+        tree.insert(_t(10, 11, 12))  # A: re-inserted repeatedly
+
+    tree.evict(1, lambda x: x)
+
+    assert not _present(tree, _t(10, 11, 12))  # A evicted despite re-insertions
     assert _present(tree, _t(20, 21, 22))
 
 

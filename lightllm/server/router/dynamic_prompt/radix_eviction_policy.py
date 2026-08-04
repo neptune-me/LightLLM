@@ -7,7 +7,11 @@ per-node *compare key*. Popping index 0 yields the next victim. A policy owns:
   two tuple components MUST stay ``(ref_counter > 0, len(children))`` so that
   referenced nodes and non-leaves can never be chosen before a free leaf; this
   is a structural invariant of ``RadixCache.evict``.
-* ``touch(node)`` - called whenever an existing node is (re)accessed.
+* ``touch(node)`` - recency/structural signal, fired on every insert,
+  re-insert and (read-only or not) prefix match.
+* ``on_access(node)`` - genuine-reuse signal, fired only for
+  ``match_prefix(update_refs=True)``. Size-aware LFU counts frequency here so
+  that inserts and read-only scheduler probes do not pollute the score.
 * ``on_new_node(node, split_from=...)`` - called right after a node is created.
 * ``on_merge(parent, child)`` - called when two nodes are merged.
 * ``on_evict(node)`` - called when a node is evicted (lets a policy age).
@@ -33,7 +37,13 @@ class EvictionPolicy:
         raise NotImplementedError
 
     def touch(self, node: "TreeNode") -> None:
+        # Recency / structural signal: fired on every insert, re-insert and probe.
         node.update_time()
+
+    def on_access(self, node: "TreeNode") -> None:
+        # Genuine reuse signal: fired only for match_prefix(update_refs=True),
+        # i.e. when a request actually pins and reuses the prefix.
+        pass
 
     def on_new_node(self, node: "TreeNode", split_from: Optional["TreeNode"] = None) -> None:
         pass
@@ -101,7 +111,12 @@ class GDSFEvictionPolicy(EvictionPolicy):
         )
 
     def touch(self, node: "TreeNode") -> None:
+        # Recency only. Inserts, re-inserts and read-only probes must not affect
+        # the size-aware LFU score, so frequency and the aging clock are left
+        # untouched here (see on_access).
         node.update_time()
+
+    def on_access(self, node: "TreeNode") -> None:
         node._gdsf_freq += 1
         node._gdsf_clock = self.aging_clock
 

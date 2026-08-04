@@ -52,13 +52,27 @@ def test_gdsf_new_node_initial_priority():
     assert policy.priority(node) == pytest.approx(0.25)
 
 
-def test_gdsf_touch_increments_frequency_and_priority():
+def test_gdsf_access_increments_frequency_and_priority():
     policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
     node = _make_node(4)
     policy.on_new_node(node)
-    policy.touch(node)  # freq -> 2
+    policy.on_access(node)  # genuine reuse: freq -> 2
     assert node._gdsf_freq == 2
     assert policy.priority(node) == pytest.approx(0.5)
+
+
+def test_gdsf_touch_does_not_change_frequency():
+    """touch() is a recency/structural signal (inserts, probes) and must NOT
+    inflate the frequency used for size-aware LFU."""
+    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    node = _make_node(4)
+    policy.on_new_node(node)
+    freq_before = node._gdsf_freq
+    prio_before = policy.priority(node)
+    for _ in range(5):
+        policy.touch(node)
+    assert node._gdsf_freq == freq_before
+    assert policy.priority(node) == pytest.approx(prio_before)
 
 
 def test_gdsf_is_size_aware_larger_node_lower_priority():
@@ -79,7 +93,7 @@ def test_gdsf_is_frequency_aware_less_used_lower_priority():
     policy.on_new_node(hot)
     policy.on_new_node(cold)
     for _ in range(5):
-        policy.touch(hot)
+        policy.on_access(hot)
     assert policy.compare_key(cold) < policy.compare_key(hot)
 
 
@@ -118,8 +132,8 @@ def test_gdsf_aging_prevents_immediate_reeviction_of_new_node():
     policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
     evicted = _make_node(1)
     policy.on_new_node(evicted)
-    policy.touch(evicted)  # bump priority up
-    policy.touch(evicted)
+    policy.on_access(evicted)  # bump priority up
+    policy.on_access(evicted)
     high_priority = policy.priority(evicted)
     policy.on_evict(evicted)  # aging_clock jumps to high_priority
     fresh = _make_node(1)
@@ -127,13 +141,29 @@ def test_gdsf_aging_prevents_immediate_reeviction_of_new_node():
     assert policy.priority(fresh) > high_priority
 
 
+def test_gdsf_access_refreshes_clock_but_touch_does_not():
+    policy = GDSFEvictionPolicy(cost=1.0, size_exponent=1.0)
+    victim = _make_node(1)
+    policy.on_new_node(victim)
+    policy.on_evict(victim)  # raise aging_clock above 0
+    assert policy.aging_clock > 0.0
+
+    node = _make_node(4)
+    policy.on_new_node(node)
+    node._gdsf_clock = 0.0  # pretend it was created long ago
+    policy.touch(node)
+    assert node._gdsf_clock == 0.0  # touch must not refresh the aging clock
+    policy.on_access(node)
+    assert node._gdsf_clock == policy.aging_clock  # genuine access refreshes it
+
+
 def test_gdsf_split_inherits_history():
     """A split node carved from an existing node inherits its freq/clock."""
     policy = GDSFEvictionPolicy()
     original = _make_node(6)
     policy.on_new_node(original)
-    policy.touch(original)
-    policy.touch(original)
+    policy.on_access(original)
+    policy.on_access(original)
     head = _make_node(2)
     policy.on_new_node(head, split_from=original)
     assert head._gdsf_freq == original._gdsf_freq
