@@ -98,6 +98,7 @@ class StartArgs:
     disable_dynamic_prompt_cache: bool = field(default=False)
     radix_eviction_policy: str = field(default="lru", metadata={"choices": ["lru", "gdsf_compute"]})
     enable_elastic_radix_eviction: bool = field(default=False)
+    # keep in sync with radix_cache.DEFAULT_ELASTIC_MIN_RETAIN_TOKENS
     elastic_radix_min_retain_tokens: int = field(default=8)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)

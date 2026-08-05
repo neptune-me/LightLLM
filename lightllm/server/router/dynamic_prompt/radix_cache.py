@@ -137,6 +137,12 @@ def match(t1: torch.Tensor, t2: torch.Tensor) -> int:
         return mismatch_indices[0].item()
 
 
+#: 弹性回收保留前缀的默认下限。这里是这个默认值的唯一定义处, ``--elastic_radix_min_retain_tokens``
+#: 和 ``StartArgs.elastic_radix_min_retain_tokens`` 必须与它保持一致
+#: (由 test_elastic_radix_eviction.py 中的 default-drift 测试守护)。
+DEFAULT_ELASTIC_MIN_RETAIN_TOKENS = 8
+
+
 class RadixCache:
     """
     unique_name 主要用于解决单机，多实列部署时的shm冲突
@@ -150,7 +156,7 @@ class RadixCache:
         mem_manager=None,
         eviction_policy="lru",
         enable_elastic_eviction: bool = False,
-        elastic_min_retain_tokens: int = 1,
+        elastic_min_retain_tokens: int = DEFAULT_ELASTIC_MIN_RETAIN_TOKENS,
     ):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 

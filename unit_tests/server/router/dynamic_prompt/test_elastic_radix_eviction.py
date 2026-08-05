@@ -13,7 +13,7 @@ Elastic Radix Eviction 的单元测试。
 import pytest
 import torch
 
-from lightllm.server.router.dynamic_prompt.radix_cache import RadixCache
+from lightllm.server.router.dynamic_prompt.radix_cache import DEFAULT_ELASTIC_MIN_RETAIN_TOKENS, RadixCache
 from lightllm.server.router.dynamic_prompt.linear_att_radix_cache import LinearAttPagedTreeNode
 from lightllm.server.router.dynamic_prompt.radix_eviction_policy import (
     ComputeAwareGDSFEvictionPolicy,
@@ -307,6 +307,44 @@ def test_repeated_truncation_shrinks_the_same_cold_leaf():
 def test_min_retain_tokens_must_be_positive():
     with pytest.raises(AssertionError):
         _make_tree(rank_in_node=0, elastic_min_retain_tokens=0)
+
+
+def test_min_retain_default_matches_constructor_and_cli():
+    """
+    这个默认值有三处出口 (RadixCache 构造函数 / CLI / StartArgs)，必须一致，
+    否则直接构造 RadixCache 的调用方会拿到与文档和线上不同的碎片化行为。
+    这里覆盖前两处；StartArgs 见下一个用例。
+    """
+    import inspect
+
+    signature_default = inspect.signature(RadixCache.__init__).parameters["elastic_min_retain_tokens"].default
+    assert signature_default == DEFAULT_ELASTIC_MIN_RETAIN_TOKENS
+
+    from lightllm.server.api_cli import make_argument_parser
+
+    cli_default = make_argument_parser().parse_args(["--model_dir", "/tmp/m"]).elastic_radix_min_retain_tokens
+    assert cli_default == DEFAULT_ELASTIC_MIN_RETAIN_TOKENS
+
+
+def test_min_retain_default_matches_start_args():
+    # StartArgs 依赖 atomics 等仅在完整服务端环境可用的模块。
+    pytest.importorskip("atomics", reason="StartArgs is only importable in a full server environment")
+    from lightllm.server.core.objs.start_args_type import StartArgs
+
+    assert StartArgs().elastic_radix_min_retain_tokens == DEFAULT_ELASTIC_MIN_RETAIN_TOKENS
+
+
+def test_default_min_retain_rejects_short_fragments():
+    """不显式传参构造时，也应该拿到 8 这个下限，而不是退化成"什么碎片都留"。"""
+    tree = RadixCache("elastic_radix_test", 100, 0, enable_elastic_eviction=True)
+    assert tree.elastic_min_retain_tokens == DEFAULT_ELASTIC_MIN_RETAIN_TOKENS
+
+    tree.insert(_tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9]), _tensor([100, 101, 102, 103, 104, 105, 106, 107, 108, 109]))
+
+    # 留下 5 个 < 8 -> 整节点回收，而不是留下一个太短的碎片。
+    freed = _collect(tree, 5)
+    assert len(freed) == 10
+    assert len(tree.root_node.children) == 0
 
 
 class _FakeAllocator:

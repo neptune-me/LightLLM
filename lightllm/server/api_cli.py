@@ -357,6 +357,8 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--elastic_radix_min_retain_tokens",
         type=int,
+        # keep in sync with radix_cache.DEFAULT_ELASTIC_MIN_RETAIN_TOKENS (not imported here to keep
+        # this module free of the torch import chain); the default-drift unit test enforces it.
         default=8,
         help="""only used when --enable_elastic_radix_eviction is on. If truncating a cold leaf would leave
         fewer than this many tokens on it, the whole leaf is evicted instead, so that the tree does not
