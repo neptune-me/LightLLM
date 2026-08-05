@@ -6,13 +6,22 @@ per-node *compare key*. Popping index ``0`` yields the next victim. A policy is
 responsible for three things:
 
 * ``get_compare_key(node)`` -- the sort key used to order eviction candidates.
-* ``update_node(node)``     -- called whenever a node is "touched" (inserted or
-                               matched), i.e. the access-recency / frequency hook.
+* ``touch_node(node)``      -- recency / priority bookkeeping that is NOT a reuse.
+                               Called on insertion, node creation, and read-only
+                               probes. Never increments frequency.
+* ``record_reuse(node)``    -- a genuine cache reuse, i.e. ``match_prefix`` with
+                               ``update_refs=True``. This is the ONLY hook that
+                               counts toward a node's frequency.
 * ``on_evict(node)``        -- called when a node is evicted (lets aging policies
                                advance their global clock).
 * ``on_merge(parent, child)`` -- called when ``child`` absorbs ``parent`` during a
                                node merge, so metadata (recency / frequency) can be
                                carried over.
+
+Frequency policy: a node's ``freq`` reflects genuine reuse only. Inserting the
+node's KV back into the tree, splitting/merging it, read-only probes, and
+reference-counter bookkeeping do NOT count as reuse -- only a real prompt-cache
+hit through ``match_prefix(update_refs=True)`` does.
 
 Two policies are provided:
 
@@ -52,8 +61,16 @@ class EvictionPolicy:
     def get_compare_key(self, node) -> Tuple:
         raise NotImplementedError
 
-    def update_node(self, node) -> None:
-        """Touch ``node`` on insert / match (recency + frequency accounting)."""
+    def touch_node(self, node) -> None:
+        """Recency / priority bookkeeping without counting a reuse.
+
+        Called on insertion, node creation, and read-only probes. Must never
+        increment a node's frequency.
+        """
+        raise NotImplementedError
+
+    def record_reuse(self, node) -> None:
+        """Count a genuine cache reuse (``match_prefix`` with ``update_refs=True``)."""
         raise NotImplementedError
 
     def on_evict(self, node) -> None:
@@ -78,7 +95,11 @@ class LRUEvictionPolicy(EvictionPolicy):
     def get_compare_key(self, node) -> Tuple:
         return (0 if node.ref_counter == 0 else 1, len(node.children), node.time_id)
 
-    def update_node(self, node) -> None:
+    def touch_node(self, node) -> None:
+        node.update_time()
+
+    def record_reuse(self, node) -> None:
+        # LRU is recency-only; reuse and any other touch both just refresh recency.
         node.update_time()
 
     def on_merge(self, parent_node, child_node) -> None:
@@ -122,7 +143,15 @@ class ComputeAwareGDSFEvictionPolicy(EvictionPolicy):
         # Evict unreferenced nodes first, then lowest priority, oldest as tiebreak.
         return (0 if node.ref_counter == 0 else 1, node.priority, node.time_id)
 
-    def update_node(self, node) -> None:
+    def touch_node(self, node) -> None:
+        # Refresh recency + priority WITHOUT counting a reuse. A node whose freq is
+        # still 0 (never genuinely reused) scores priority == global_age, i.e. it is
+        # a prime eviction candidate regardless of how expensive it was to compute.
+        node.update_time()
+        node.priority = self.compute_priority(node)
+
+    def record_reuse(self, node) -> None:
+        # Genuine prompt-cache hit: this is the only path that grows frequency.
         node.update_time()
         node.freq += 1
         node.priority = self.compute_priority(node)

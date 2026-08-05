@@ -172,7 +172,8 @@ class RadixCache:
 
         while len(update_list) != 0:
             cur_node: TreeNode = update_list.pop()
-            self.eviction_policy.update_node(cur_node)
+            # Insertion (KV write-back) is not a reuse: refresh bookkeeping only.
+            self.eviction_policy.touch_node(cur_node)
             if cur_node.is_leaf():
                 self.evict_tree_set.add(cur_node)
 
@@ -194,7 +195,8 @@ class RadixCache:
                 if prefix_len == len(child.token_id_key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
-                    self.eviction_policy.update_node(child)
+                    # Re-inserting an already-cached prefix is not a reuse.
+                    self.eviction_policy.touch_node(child)
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
                     return prefix_len, child
@@ -221,7 +223,8 @@ class RadixCache:
                 value = value[prefix_len:]
                 split_parent_node = child.split_node(prefix_len)
                 new_node = split_parent_node.add_and_return_new_child(key, value)
-                self.eviction_policy.update_node(new_node)
+                # Admitting a brand-new node initializes bookkeeping, not reuse.
+                self.eviction_policy.touch_node(new_node)
                 # update total token num
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
 
@@ -240,7 +243,8 @@ class RadixCache:
 
         else:
             new_node = node.add_and_return_new_child(key, value)
-            self.eviction_policy.update_node(new_node)
+            # Admitting a brand-new node initializes bookkeeping, not reuse.
+            self.eviction_policy.touch_node(new_node)
             # update total token num
             self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
             if new_node.is_leaf():
@@ -286,7 +290,12 @@ class RadixCache:
 
         while len(update_list) != 0:
             cur_node: TreeNode = update_list.pop()
-            self.eviction_policy.update_node(cur_node)
+            # Only a real prompt-cache hit (update_refs=True) counts as reuse;
+            # a read-only probe (update_refs=False) is bookkeeping only.
+            if update_refs:
+                self.eviction_policy.record_reuse(cur_node)
+            else:
+                self.eviction_policy.touch_node(cur_node)
             if cur_node.is_leaf():
                 self.evict_tree_set.add(cur_node)
 
