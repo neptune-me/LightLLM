@@ -77,14 +77,17 @@ class GDSFEvictionPolicy(EvictionPolicy):
 
         priority = global_age + frequency * recompute_cost / resident_tokens
 
-    where ``recompute_cost = L*(L+1)/2`` for a prefix of length ``L =
-    node.node_prefix_total_len`` (``sum_{i=1}^{L} i`` because each new token
-    attends over the growing prefix, i.e. ``O(L^2)`` total prefill work),
-    ``resident_tokens`` is the node's token count (``size``), ``frequency``
-    is ``_gdsf_freq`` and ``global_age`` is the node's frozen
-    ``_gdsf_clock`` (global ``aging_clock`` at last access). Deeper prefixes
-    are therefore disproportionately more expensive to recompute and rank
-    higher (evicted later).
+    where ``recompute_cost = end_depth^2 - start_depth^2`` for a node
+    storing ``[start_depth, end_depth)`` (``end_depth =
+    node.node_prefix_total_len``, ``start_depth = end_depth - size``),
+    i.e. ``O(L^2)`` total prefill work because each new token attends over
+    the growing prefix (incremental cost for the segment is the difference
+    of the two quadratic prefix costs). ``resident_tokens`` is the node's
+    token count (``size``), ``frequency`` is ``_gdsf_freq`` and
+    ``global_age`` is the node's frozen ``_gdsf_clock`` (global
+    ``aging_clock`` at last access). Deeper segments are therefore
+    disproportionately more expensive to recompute and rank higher (evicted
+    later).
 
     The global ``aging_clock`` is bumped to the priority of every evicted node,
     so newly created / reaccessed nodes inherit a rising floor (classic GDSF
@@ -98,10 +101,10 @@ class GDSFEvictionPolicy(EvictionPolicy):
     * ``compute_aware`` - when ``True`` include per-node compute cost in the
       numerator; ``False`` (default) preserves the pure size-aware behaviour
       and keeps all existing tests passing.
-    * ``compute_weight`` - exponent applied to the quadratic compute cost
-      (``cost ** compute_weight``). ``1.0`` keeps the quadratic ``L*(L+1)/2``
-      (default), ``0.5`` recovers linear ``O(L)`` for linear-attention,
-      ``2.0`` would be quartic.
+    * ``compute_weight`` - exponent applied to the segment compute cost
+      (``cost ** compute_weight``). ``1.0`` keeps ``end^2 - start^2``
+      (default), ``0.5`` recovers ``sqrt``-quadratic (approx linear ``O(L)``
+      for linear-attention), ``2.0`` would be quartic.
 
     Note: classic GDSF also carries a per-object fetch cost ``C(i)``. A *global*
     constant cost is deliberately omitted in the default (non-compute-aware)
@@ -153,26 +156,36 @@ class GDSFEvictionPolicy(EvictionPolicy):
 
     @staticmethod
     def _compute_cost(node: "TreeNode") -> float:
-        """Estimate compute saved by caching this node's prefix.
+        """Estimate compute saved by caching this node's segment.
 
         Prefill work is quadratic: token *i* attends over *i* previous tokens,
-        so total work for a prefix of length *L* is ``sum_{i=1}^{L} i =
-        L*(L+1)/2 = O(L^2)``. We use this as the per-prefix compute proxy;
-        deeper prefixes (larger *L*) are therefore disproportionately more
-        expensive to recompute than shallow ones. For linear-attention the
-        cost is ``O(L)`` and can be recovered with ``compute_weight=0.5``
-        (since ``(L^2)**0.5 = L``). Falls back to node size when
-        ``node_prefix_total_len`` is not yet set.
+        so work for a prefix of length *L* is ``~ L^2``. The incremental
+        recompute cost for a node that stores the segment
+        ``[start_depth, end_depth)`` (where ``end_depth =
+        node_prefix_total_len`` and ``start_depth = end_depth - size``) is::
+
+            recompute_cost = end_depth^2 - start_depth^2
+
+        This is the difference of the two quadratic prefix costs and equals
+        ``2*L*S - S^2`` for a node of size ``S`` at depth ``L``. Deeper
+        segments are disproportionately more expensive. Falls back to
+        ``size^2`` when prefix length is not yet set.
         """
-        prefix = getattr(node, "node_prefix_total_len", 0)
-        if prefix is None or prefix == 0:
-            try:
-                prefix = len(node.token_mem_index_value) if node.token_mem_index_value is not None else 1
-            except Exception:
-                prefix = 1
-        prefix = int(max(prefix, 1))
-        # Quadratic: L*(L+1)//2  (sum of growing attention windows)
-        return float(prefix * (prefix + 1) // 2)
+        end_depth = getattr(node, "node_prefix_total_len", 0)
+        size = 0
+        try:
+            if node.token_mem_index_value is not None:
+                size = len(node.token_mem_index_value)
+        except Exception:
+            size = 0
+        if end_depth is None or end_depth == 0:
+            # fallback: isolated node, start 0
+            size = max(size, 1)
+            return float(size * size)
+        end_depth = int(max(end_depth, 1))
+        size = int(max(size, 1))
+        start_depth = max(end_depth - size, 0)
+        return float(end_depth * end_depth - start_depth * start_depth)
 
     def priority(self, node: "TreeNode") -> float:
         # Non-compute-aware GDSF: clock + freq / size**exp

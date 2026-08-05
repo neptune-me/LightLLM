@@ -153,33 +153,37 @@ def test_split_inherits_zero_freq():
 
 
 # --------------------------------------------------------------------------- #
-# Quadratic recompute cost L*(L+1)/2
+# Quadratic recompute cost end^2 - start^2
 # --------------------------------------------------------------------------- #
 def test_compute_cost_is_quadratic():
     policy = GDSFEvictionPolicy(compute_aware=True)
-    # L=10 => 55, L=3 => 6
+    # isolated nodes: start 0 => cost = L^2
+    # L=10 size10 => 100, L=3 size3 => 9
     n10 = _make_node(10, prefix_len=10)
     n3 = _make_node(3, prefix_len=3)
-    assert policy._compute_cost(n10) == pytest.approx(55.0)
-    assert policy._compute_cost(n3) == pytest.approx(6.0)
-    # fallback when prefix not set -> uses size
+    assert policy._compute_cost(n10) == pytest.approx(100.0)
+    assert policy._compute_cost(n3) == pytest.approx(9.0)
+    # segment: L=4 size2 => start2 => 16-4=12
+    n_seg = _make_node(2, prefix_len=4)
+    assert policy._compute_cost(n_seg) == pytest.approx(12.0)
+    # fallback when prefix not set -> size^2
     n4_no_prefix = _make_node(4, prefix_len=0)
-    # size 4 => fallback prefix 4 => 10
-    assert policy._compute_cost(n4_no_prefix) == pytest.approx(10.0)
+    # size 4 => 16
+    assert policy._compute_cost(n4_no_prefix) == pytest.approx(16.0)
 
 
 def test_compute_weight_tunes_linear_vs_quadratic():
-    # cost 6 for L=3 (3*4/2)
-    # weight 1.0 => 6, weight 0.5 => sqrt(6)
+    # cost 9 for L=3 size3 (3^2)
+    # weight 1.0 => 9, weight 0.5 => sqrt(9)=3
     n = _make_node(3, prefix_len=3)
     n._gdsf_freq = 1
     n._gdsf_clock = 0.0
     p_quad = GDSFEvictionPolicy(compute_aware=True, compute_weight=1.0)
     p_lin = GDSFEvictionPolicy(compute_aware=True, compute_weight=0.5)
     # priority = clock + freq*cost/resident ; resident=3
-    # quad: 6/3=2.0, lin: sqrt(6)/3 ~=0.816
-    assert p_quad.priority(n) == pytest.approx(2.0)
-    assert p_lin.priority(n) == pytest.approx((6.0 ** 0.5) / 3)
+    # quad: 9/3=3.0, lin: sqrt(9)/3 =1.0
+    assert p_quad.priority(n) == pytest.approx(3.0)
+    assert p_lin.priority(n) == pytest.approx((9.0 ** 0.5) / 3)
 
 
 # --------------------------------------------------------------------------- #
@@ -188,27 +192,27 @@ def test_compute_weight_tunes_linear_vs_quadratic():
 def test_priority_formula_global_age_plus_freq_cost_over_resident():
     policy = GDSFEvictionPolicy(compute_aware=True)
     policy.aging_clock = 5.0
-    node = _make_node(2, prefix_len=4)  # L=4 => cost 10, resident 2
+    node = _make_node(2, prefix_len=4)  # L=4 size2 => start2 => cost 12, resident 2
     policy.on_new_node(node)  # freq 0, clock 5
     assert node._gdsf_clock == 5.0
     assert policy.priority(node) == pytest.approx(5.0)  # 5 + 0
     policy.on_access(node)  # freq 1, clock stays 5
-    # priority = 5 + 1*10/2 = 10
-    assert policy.priority(node) == pytest.approx(10.0)
+    # priority = 5 + 1*12/2 = 11
+    assert policy.priority(node) == pytest.approx(11.0)
     policy.on_access(node)  # freq 2
-    # 5 + 2*10/2 = 15
-    assert policy.priority(node) == pytest.approx(15.0)
+    # 5 + 2*12/2 = 17
+    assert policy.priority(node) == pytest.approx(17.0)
 
 
 def test_priority_resident_tokens_not_size_exponent():
     # compute-aware must divide by resident_tokens, not size**exp
     # Use exp 0.5 to show difference: size**0.5 vs size
     policy_exp = GDSFEvictionPolicy(compute_aware=True, size_exponent=0.5)
-    node = _make_node(4, prefix_len=4)  # cost 10
+    node = _make_node(4, prefix_len=4)  # isolated L4 size4 => cost 16
     policy_exp.on_new_node(node)
     policy_exp.on_access(node)  # freq 1
-    # Should be 10/4 =2.5, not 10 / 4**0.5 (=5)
-    assert policy_exp.priority(node) == pytest.approx(2.5)
+    # Should be 16/4 =4.0, not 16 / 4**0.5 (=8)
+    assert policy_exp.priority(node) == pytest.approx(4.0)
     # Non-compute-aware still uses exponent
     policy_plain = GDSFEvictionPolicy(size_exponent=0.5, compute_aware=False)
     node2 = _make_node(4, prefix_len=4)
@@ -219,9 +223,9 @@ def test_priority_resident_tokens_not_size_exponent():
 
 def test_compute_aware_size_aware_vs_compute_aware_ordering():
     # Equal freq, different size and depth: size-aware and compute-aware disagree
-    # Small shallow: size2 L2 cost3 ; Large deep: size8 L8 cost36
+    # Small shallow: size2 L2 cost4 (2^2) ; Large deep: size8 L8 cost64 (8^2)
     # With freq1, size-aware: small 0.5 vs large 0.125 -> small larger, large evicted
-    # Compute-aware: small 1.5 vs large 4.5 -> large larger, small evicted (flipped)
+    # Compute-aware: small 2 vs large 8 -> large larger, small evicted (flipped)
     # This demonstrates recompute_cost dominates size.
     policy_plain = GDSFEvictionPolicy(size_exponent=1.0, compute_aware=False)
     policy_compute = GDSFEvictionPolicy(compute_aware=True)
@@ -318,8 +322,8 @@ def test_radix_cache_gdsf_compute_via_gdsf_flag():
     assert node._gdsf_freq == 0
     _reuse(tree, _t(1, 2, 3, 4), times=1)
     assert node._gdsf_freq == 1
-    # L4 cost10 size4 => 2.5
-    assert tree._evict_policy.priority(node) == pytest.approx(2.5)
+    # isolated L4 size4 => start0 cost 16 => 16/4=4.0
+    assert tree._evict_policy.priority(node) == pytest.approx(4.0)
 
 
 def test_radix_cache_gdsf_compute_deep_vs_shallow_same_size():

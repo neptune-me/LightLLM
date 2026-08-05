@@ -347,14 +347,15 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         (Greedy-Dual-Size-Frequency) policy that scores nodes by
         aging_clock + freq / size ** size_exponent and evicts the lowest score,
         favoring small, frequently reused prefixes. "gdsf_compute" is the
-        compute-aware variant (aging_clock + freq * compute_cost / size **
-        size_exponent where compute_cost = L*(L+1)/2 for prefix length L,
-        i.e. quadratic prefill FLOPs because each new token attends over the
-        growing prefix); it keeps deeper/more expensive prefixes longer. The
-        flag --radix_cache_gdsf_compute_aware also enables compute-aware
-        scoring for "gdsf". Only applies to the standard radix cache;
-        linear-attention (mamba mixed) models always use LRU and will warn if
-        a different policy is requested.""",
+        compute-aware variant (priority = global_age + freq * recompute_cost /
+        resident_tokens where recompute_cost = end^2 - start^2 for a segment
+        [start, end) with end = prefix length, start = end - size, i.e.
+        quadratic prefill FLOPs because each new token attends over the growing
+        prefix); it keeps deeper/more expensive segments longer. The flag
+        --radix_cache_gdsf_compute_aware also enables compute-aware scoring for
+        "gdsf". Only applies to the standard radix cache; linear-attention
+        (mamba mixed) models always use LRU and will warn if a different policy
+        is requested.""",
     )
     parser.add_argument(
         "--radix_cache_gdsf_size_exponent",
@@ -369,19 +370,20 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         action="store_true",
         default=False,
         help="""GDSF only: when enabled the eviction priority becomes
-        aging_clock + freq * compute_cost / size ** size_exponent where
-        compute_cost = L*(L+1)/2 for prefix length L (sum of growing
-        attention windows, O(L^2), proxy for prefill FLOPs). Deeper /
-        more expensive prefixes are therefore kept longer. Off by default
-        to preserve pure size-aware behaviour.""",
+        priority = global_age + freq * recompute_cost / resident_tokens
+        where recompute_cost = end^2 - start^2 for a segment [start,end)
+        (end = prefix length, start = end - size, O(L^2) quadratic prefill
+        work because each new token attends over the growing prefix). Deeper /
+        more expensive segments are therefore kept longer. Off by default to
+        preserve pure size-aware behaviour.""",
     )
     parser.add_argument(
         "--radix_cache_gdsf_compute_weight",
         type=float,
         default=1.0,
-        help="""GDSF compute-aware only: exponent applied to quadratic compute_cost
-        (cost ** compute_weight). 1.0 keeps quadratic L*(L+1)/2 (default),
-        0.5 recovers linear O(L) for linear-attention, 2.0 is quartic.
+        help="""GDSF compute-aware only: exponent applied to segment recompute_cost
+        (cost ** compute_weight). 1.0 keeps end^2 - start^2 (default),
+        0.5 approximates sqrt (linear), 2.0 is quartic.
         Ignored when --radix_cache_gdsf_compute_aware is off.""",
     )
 
