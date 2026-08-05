@@ -213,7 +213,7 @@ class GDSFEvictionPolicy(EvictionPolicy):
             node._gdsf_freq = split_from._gdsf_freq
             node._gdsf_clock = split_from._gdsf_clock
         else:
-            node._gdsf_freq = 1
+            node._gdsf_freq = 0
             node._gdsf_clock = self.aging_clock
 
     def on_merge(self, parent: "TreeNode", child: "TreeNode") -> None:

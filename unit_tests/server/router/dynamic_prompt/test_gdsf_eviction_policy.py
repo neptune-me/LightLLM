@@ -47,18 +47,18 @@ def test_gdsf_new_node_initial_priority():
     policy = GDSFEvictionPolicy(size_exponent=1.0)
     node = _make_node(4)
     policy.on_new_node(node)
-    # priority = aging_clock(0) + freq(1) / size(4)
-    assert node._gdsf_freq == 1
-    assert policy.priority(node) == pytest.approx(0.25)
+    # new nodes start at 0 (insertion does not count as reuse)
+    assert node._gdsf_freq == 0
+    assert policy.priority(node) == pytest.approx(0.0)
 
 
 def test_gdsf_access_increments_frequency_and_priority():
     policy = GDSFEvictionPolicy(size_exponent=1.0)
     node = _make_node(4)
     policy.on_new_node(node)
-    policy.on_access(node)  # genuine reuse: freq -> 2
-    assert node._gdsf_freq == 2
-    assert policy.priority(node) == pytest.approx(0.5)
+    policy.on_access(node)  # genuine reuse: freq -> 1
+    assert node._gdsf_freq == 1
+    assert policy.priority(node) == pytest.approx(0.25)
 
 
 def test_gdsf_touch_does_not_change_frequency():
@@ -82,6 +82,8 @@ def test_gdsf_is_size_aware_larger_node_lower_priority():
     large = _make_node(8)
     policy.on_new_node(small)
     policy.on_new_node(large)
+    policy.on_access(small)  # freq 1 each -> equal freq, size decides
+    policy.on_access(large)
     assert policy.compare_key(large) < policy.compare_key(small)
 
 
@@ -132,12 +134,13 @@ def test_gdsf_aging_prevents_immediate_reeviction_of_new_node():
     policy = GDSFEvictionPolicy(size_exponent=1.0)
     evicted = _make_node(1)
     policy.on_new_node(evicted)
-    policy.on_access(evicted)  # bump priority up
-    policy.on_access(evicted)
+    policy.on_access(evicted)  # freq 1
+    policy.on_access(evicted)  # freq 2
     high_priority = policy.priority(evicted)
     policy.on_evict(evicted)  # aging_clock jumps to high_priority
     fresh = _make_node(1)
     policy.on_new_node(fresh)
+    policy.on_access(fresh)  # give fresh one reuse so its priority is clock+1/size
     assert policy.priority(fresh) > high_priority
 
 
@@ -145,6 +148,7 @@ def test_gdsf_access_refreshes_clock_but_touch_does_not():
     policy = GDSFEvictionPolicy(size_exponent=1.0)
     victim = _make_node(1)
     policy.on_new_node(victim)
+    policy.on_access(victim)  # need freq to make priority >0
     policy.on_evict(victim)  # raise aging_clock above 0
     assert policy.aging_clock > 0.0
 
@@ -169,11 +173,11 @@ def test_gdsf_merge_does_not_overstate_combined_frequency():
     policy.on_new_node(child)
     # parent (ancestor) is reached at least as often as the child
     for _ in range(3):
-        policy.on_access(parent)  # parent freq -> 4
-    policy.on_access(child)  # child freq -> 2
+        policy.on_access(parent)  # parent freq -> 3
+    policy.on_access(child)  # child freq -> 1
 
     policy.on_merge(parent, child)  # child survives as the merged node
-    assert child._gdsf_freq == 2  # deeper-node count, not max(4, 2)
+    assert child._gdsf_freq == 1  # deeper-node count, not max(3, 1)
 
 
 def test_gdsf_merge_uses_deeper_node_clock():
@@ -236,6 +240,8 @@ def test_gdsf_ordering_independent_of_would_be_cost_scaling():
     b = _make_node(5)  # freq 1 -> 0.2
     policy.on_new_node(a)
     policy.on_new_node(b)
+    policy.on_access(a)  # freq 1
+    policy.on_access(b)  # freq 1
     keys = {"a": policy.compare_key(a), "b": policy.compare_key(b)}
     # b (larger, lower density) must be the victim regardless of any scalar
     assert min(keys, key=keys.get) == "b"

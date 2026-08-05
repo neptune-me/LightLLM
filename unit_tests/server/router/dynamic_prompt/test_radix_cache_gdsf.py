@@ -41,10 +41,13 @@ def test_gdsf_evicts_larger_prefix_first():
     tree = RadixCache("gdsf_size", 100, 0, eviction_policy="gdsf")
     tree.insert(_t(10, 11))  # small: 2 tokens
     tree.insert(_t(20, 21, 22, 23, 24, 25, 26, 27, 28, 29))  # large: 10 tokens
+    # need one genuine reuse each to give freq 1 (insertion no longer counts)
+    _reuse(tree, _t(10, 11), times=1)
+    _reuse(tree, _t(20, 21, 22, 23, 24, 25, 26, 27, 28, 29), times=1)
 
     tree.evict(1, lambda x: x)
 
-    assert _present(tree, _t(10, 11))  # small survives
+    assert _present(tree, _t(10, 11))  # small survives (higher priority)
     assert not _present(tree, _t(20, 21))  # large was evicted
 
 
@@ -103,15 +106,15 @@ def test_gdsf_partial_prefix_hit_credits_frequency():
     """A genuine reuse that only matches part of a node (forcing a split) must
     credit the matched head node's frequency, not silently drop it."""
     tree = RadixCache("gdsf_partial", 100, 0, eviction_policy="gdsf")
-    tree.insert(_t(10, 11, 12, 13, 14, 15))  # single node, freq seeded to 1
+    tree.insert(_t(10, 11, 12, 13, 14, 15))  # single node, freq 0 initially
 
     # partial match of the first 3 tokens: splits into head [10,11,12] + tail
     node, size, _ = tree.match_prefix(_t(10, 11, 12), update_refs=True)
     tree.dec_node_ref_counter(node)
 
     assert size == 3
-    # inherited freq (1) from the original node + 1 for this genuine access
-    assert node._gdsf_freq == 2
+    # inherited freq (0) from the original node + 1 for this genuine access
+    assert node._gdsf_freq == 1
 
 
 def test_gdsf_partial_hit_credit_changes_eviction_outcome():
@@ -181,13 +184,13 @@ def test_gdsf_merge_keeps_deeper_node_frequency():
     _reuse(tree, _t(1, 2, 3), times=3)  # accesses only the A prefix
     _reuse(tree, _t(1, 2, 3, 4, 5), times=1)  # accesses the full A+B span
 
-    # A freq = 1 + 3 + 1 = 5 ; B freq = 1 + 1 = 2
-    assert node_a._gdsf_freq == 5 and node_b._gdsf_freq == 2
+    # A freq = 0 + 3 + 1 = 4 ; B freq = 0 + 1 = 1
+    assert node_a._gdsf_freq == 4 and node_b._gdsf_freq == 1
 
     tree.merge_unreferenced_nodes()  # A merges into B
 
     assert tree.root_node.children[1] is node_b
-    assert node_b._gdsf_freq == 2  # deeper-node count, not 5
+    assert node_b._gdsf_freq == 1  # deeper-node count, not 4
 
 
 def test_gdsf_bookkeeping_matches_lru():
