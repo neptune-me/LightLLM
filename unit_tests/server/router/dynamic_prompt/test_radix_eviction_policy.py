@@ -87,16 +87,24 @@ def test_record_reuse_increments_freq_and_reanchors_age():
     assert node.priority == pytest.approx(9.0)  # 5 + 1 * 16 / 4
 
 
-def test_touch_node_preserves_frozen_age_and_freq():
+def test_touch_node_preserves_age_freq_and_recency():
     policy = ComputeAwareGDSFEvictionPolicy()
     policy.global_age = 7.0
-    node = _FakeNode(node_prefix_total_len=4, node_value_len=4)  # cost 16, size 4
+    node = _FakeNode(node_prefix_total_len=4, node_value_len=4, time_id=42)  # cost 16, size 4
     node.age = 3.0  # a frozen baseline from an earlier event
     node.freq = 2
     policy.touch_node(node)
     assert node.freq == 2  # bookkeeping never grows frequency
     assert node.age == pytest.approx(3.0)  # frozen age is NOT re-anchored to 7.0
+    assert node.time_id == 42  # a non-reuse touch does NOT refresh recency
     assert node.priority == pytest.approx(3.0 + 2 * 16 / 4)  # rescored from geometry
+
+
+def test_record_reuse_refreshes_recency():
+    policy = ComputeAwareGDSFEvictionPolicy()
+    node = _FakeNode(node_prefix_total_len=4, node_value_len=4, time_id=42)
+    policy.record_reuse(node)
+    assert node.time_id == 43  # a genuine reuse DOES refresh recency
 
 
 def test_on_split_rescored_both_halves_from_new_geometry():
@@ -222,6 +230,47 @@ def test_partial_probe_does_not_count_as_reuse():
     shared_prefix = tree.root_node.children[1]
     assert torch.equal(shared_prefix.token_id_key, torch.tensor([1, 2, 3], dtype=torch.int64))
     assert shared_prefix.freq == 0  # a probe, even a partial one, is not reuse
+
+
+# --------------------------------------------------------------------------------------
+# non-reuse touches must not improve a node's eviction standing (recency)
+# --------------------------------------------------------------------------------------
+def test_readonly_probe_does_not_refresh_eviction_order():
+    # A and B are equal-priority (freq 0), so the recency tiebreak decides. A read-only
+    # probe of the older node A must NOT make it look newer than B.
+    tree = RadixCache("gdsf_probe_order", 100, 0, eviction_policy="gdsf_compute")
+    _insert(tree, [0, 1, 2])  # A: older
+    _insert(tree, [10, 11, 12])  # B: newer
+
+    _reuse(tree, [0, 1, 2], update_refs=False)  # non-reuse probe of A
+    tree.evict(3, lambda mem: None)
+    assert 0 not in tree.root_node.children  # A still evicted first (probe did not refresh)
+    assert 10 in tree.root_node.children
+
+
+def test_writeback_does_not_refresh_eviction_order():
+    # Re-inserting an already-resident node (KV write-back) must not refresh recency.
+    tree = RadixCache("gdsf_wb_order", 100, 0, eviction_policy="gdsf_compute")
+    _insert(tree, [0, 1, 2])  # A: older
+    _insert(tree, [10, 11, 12])  # B: newer
+
+    _insert(tree, [0, 1, 2])  # write-back of A -- not a reuse
+    tree.evict(3, lambda mem: None)
+    assert 0 not in tree.root_node.children  # A still evicted first
+    assert 10 in tree.root_node.children
+
+
+def test_genuine_reuse_does_refresh_eviction_order():
+    # Contrast: a genuine reuse of the older node A raises its standing so the
+    # never-reused newer node B is evicted first instead.
+    tree = RadixCache("gdsf_reuse_order", 100, 0, eviction_policy="gdsf_compute")
+    _insert(tree, [0, 1, 2])  # A: older
+    _insert(tree, [10, 11, 12])  # B: newer
+
+    _reuse(tree, [0, 1, 2])  # genuine reuse of A -> priority rises above B's
+    tree.evict(3, lambda mem: None)
+    assert 0 in tree.root_node.children  # A kept
+    assert 10 not in tree.root_node.children  # B evicted
 
 
 # --------------------------------------------------------------------------------------

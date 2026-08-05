@@ -8,9 +8,11 @@ responsible for three things:
 * ``get_compare_key(node)`` -- the sort key used to order eviction candidates.
 * ``init_node(node)``       -- admission of a brand-new node. Anchors its aging
                                baseline; not a reuse.
-* ``touch_node(node)``      -- recency / priority bookkeeping that is NOT a reuse.
-                               Called on KV write-back and read-only probes. Never
-                               increments frequency and never re-anchors the age.
+* ``touch_node(node)``      -- non-reuse bookkeeping on an existing node (KV
+                               write-back, read-only probe). Never counts as reuse:
+                               no frequency growth and no age re-anchor. GDSF also
+                               leaves recency (``time_id``) untouched -- only a
+                               genuine reuse may improve a node's eviction standing.
 * ``record_reuse(node)``    -- a genuine cache reuse, i.e. ``match_prefix`` with
                                ``update_refs=True`` (full OR partial prefix hit).
                                The ONLY hook that counts toward frequency.
@@ -184,9 +186,12 @@ class ComputeAwareGDSFEvictionPolicy(EvictionPolicy):
         node.priority = self.compute_priority(node)
 
     def touch_node(self, node) -> None:
-        # Non-reuse bookkeeping (write-back / probe): refresh recency and rescore
-        # for any geometry change, but PRESERVE the frozen age and frequency.
-        node.update_time()
+        # Non-reuse bookkeeping (write-back / probe). Rescore for any geometry
+        # change, but do NOT touch the aging component: frequency, the frozen age
+        # baseline, AND recency (time_id) are all preserved. Refreshing recency here
+        # would let a write-back or a read-only probe improve a node's eviction
+        # standing -- only a genuine reuse (record_reuse) or admission (init_node)
+        # may do that.
         node.priority = self.compute_priority(node)
 
     def record_reuse(self, node) -> None:
