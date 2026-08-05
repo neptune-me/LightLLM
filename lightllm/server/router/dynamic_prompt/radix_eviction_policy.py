@@ -232,16 +232,13 @@ class GDSFEvictionPolicy(EvictionPolicy):
             node._gdsf_clock = self.aging_clock
 
     def on_merge(self, parent: "TreeNode", child: "TreeNode") -> None:
-        # The surviving node now spans parent ++ child. Every access that reached
-        # the child also passed through the parent, so parent frequency >= child
-        # frequency; the *combined* span was fully reused only as often as the
-        # deeper node was reached. Taking the max would credit shorter parent-only
-        # hits as full-span reuses and overstate frequency, so use the deeper
-        # node's history (the min). time_id stays max to match the tree's recency
-        # convention (it is only a tiebreaker).
+        # Merge collapses parent into child; the surviving child now spans the
+        # combined prefix. Its history must remain the child's own history –
+        # the number of times the *full* combined span was reused. Do not
+        # alter child's frequency or clock; only recency (time_id) is merged
+        # as max for tie-breaking. This preserves the deeper node's GDSF
+        # state and avoids polluting it with parent-only accesses.
         child.time_id = max(parent.time_id, child.time_id)
-        child._gdsf_freq = min(parent._gdsf_freq, child._gdsf_freq)
-        child._gdsf_clock = min(parent._gdsf_clock, child._gdsf_clock)
 
     def on_evict(self, node: "TreeNode") -> None:
         # GDSF inflation: raise the floor to the evicted node's priority
