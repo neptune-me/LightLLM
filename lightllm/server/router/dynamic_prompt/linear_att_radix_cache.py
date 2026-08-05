@@ -119,6 +119,7 @@ class LinearAttPagedRadixCache:
         big_page_num: int,
         kv_cache_mem_manager=None,
         linear_att_small_page_buffers=None,
+        enable_elastic_eviction: bool = False,
     ):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
@@ -154,6 +155,15 @@ class LinearAttPagedRadixCache:
         )
         self.tree_total_tokens_num.arr[0] = 0
         self.linear_att_small_page_buffers: LinearAttCacheManager = linear_att_small_page_buffers
+        # Elastic eviction is unsupported for paged linear-att cache (page-aligned).
+        # Stored for API symmetry; _evict will raise if enabled, forcing caller to
+        # validate at model init.
+        if enable_elastic_eviction:
+            raise ValueError(
+                "Elastic radix eviction is not supported for LinearAttPagedRadixCache "
+                "(hybrid linear-attention models require whole-page eviction). "
+                "Disable --enable_elastic_radix_eviction when using linear_att_mixed models."
+            )
 
     def _discard_node(self, node: LinearAttPagedTreeNode):
         if node.is_leaf():

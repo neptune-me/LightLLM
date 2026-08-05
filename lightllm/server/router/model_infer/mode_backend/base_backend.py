@@ -165,6 +165,12 @@ class ModeBackend:
             self.radix_cache = None
         else:
             if self.is_linear_att_mixed_model:
+                if self.args.enable_elastic_radix_eviction:
+                    raise ValueError(
+                        "Elastic radix eviction (--enable_elastic_radix_eviction) is not supported "
+                        "for hybrid linear-attention models (LinearAttPagedRadixCache). "
+                        "It is only available for standard RadixCache."
+                    )
                 self.radix_cache = LinearAttPagedRadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
@@ -181,6 +187,9 @@ class ModeBackend:
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
                     eviction_policy=self.args.radix_eviction_policy,
+                    enable_elastic_eviction=self.args.enable_elastic_radix_eviction,
+                    elastic_min_retained_tokens=self.args.elastic_radix_min_retained_tokens,
+                    elastic_max_evict_tokens_per_leaf=self.args.elastic_radix_max_evict_tokens_per_leaf,
                 )
 
         if "prompt_cache_kv_buffer" in model_cfg:

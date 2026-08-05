@@ -40,6 +40,11 @@ class TreeNode:
         self.age = 0.0
         self.priority = 0.0
 
+        # Elastic eviction bookkeeping: per-step cap is enforced via
+        # elastically_used_this_call dict; no persistent lifetime counter needed.
+        # Keeping attribute for backward compatibility with merged nodes.
+        self.elastic_evicted = 0
+
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
@@ -57,6 +62,9 @@ class TreeNode:
         # on_split hook, since its geometry differs from the pre-split node.
         split_parent_node.freq = self.freq
         split_parent_node.age = self.age
+        # Elastic history preservation not needed for per-step cap, but keep
+        # attribute for compatibility.
+        split_parent_node.elastic_evicted = getattr(self, "elastic_evicted", 0)
 
         new_len = len(split_parent_node.token_mem_index_value)
         split_parent_node.node_value_len = new_len
@@ -117,7 +125,17 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None, eviction_policy="lru"):
+    def __init__(
+        self,
+        unique_name,
+        total_token_num,
+        rank_in_node,
+        mem_manager=None,
+        eviction_policy="lru",
+        enable_elastic_eviction: bool = False,
+        elastic_min_retained_tokens: int = 1,
+        elastic_max_evict_tokens_per_leaf: Optional[int] = None,
+    ):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         self.total_token_num = total_token_num
@@ -128,6 +146,15 @@ class RadixCache:
         # Pluggable eviction policy. Defaults to "lru" (the historical behavior);
         # "gdsf_compute" enables the optional compute-aware GDSF policy.
         self.eviction_policy = get_eviction_policy(eviction_policy)
+
+        # Elastic radix eviction: reclaim tail of cold leaves while preserving prefix.
+        # Disabled by default to preserve historical whole-leaf behavior.
+        self.enable_elastic_eviction = bool(enable_elastic_eviction)
+        self.elastic_min_retained_tokens = max(1, int(elastic_min_retained_tokens))
+        if elastic_max_evict_tokens_per_leaf is not None:
+            self.elastic_max_evict_tokens_per_leaf = max(1, int(elastic_max_evict_tokens_per_leaf))
+        else:
+            self.elastic_max_evict_tokens_per_leaf = None
 
         self.root_node = TreeNode()
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
@@ -367,11 +394,124 @@ class RadixCache:
                               tree_total_tokens_num {self.tree_total_tokens_num.arr[0]},
                               refed_tokens_num {self.refed_tokens_num.arr[0]}"""
         num_evicted = 0
+        # Track per-leaf elastic usage within this evict() call.
+        # Prevents GDSF (which keeps priority 0 for freq-0 leaves) from
+        # repeatedly selecting the same truncated leaf and reclaiming beyond
+        # per-leaf cap within a single eviction pass, and avoids repeated
+        # cloning of the same leaf. Persistent per-node elastic_evicted caps
+        # total elastic reclaim over the leaf's lifetime.
+        # For distribution, elastically truncated leaves are deferred (not
+        # immediately reinserted) so the same cold leaf is not selected again
+        # within the same evict() call; the next victim is the next coldest
+        # leaf. This ensures cap 2 with need 4 across two 8-token leaves
+        # yields 2+2, not 2+6 from one leaf.
+        elastically_used_this_call: Dict[int, int] = {}
+        deferred_reinsert: List[TreeNode] = []
         while num_evicted < need_remove_tokens:
+            # If all remaining leaves in the set are referenced, the deferred
+            # unreferenced truncated leaves must be reinserted first. Otherwise
+            # deferring would expose a referenced leaf as the next victim,
+            # violating the invariant that only ref_counter==0 leaves are evicted.
+            if deferred_reinsert and self.evict_tree_set:
+                # Peek at the smallest element; ordering is (ref==0?0:1, ...)
+                # so if the first is referenced, no unreferenced remain.
+                first = next(iter(self.evict_tree_set))
+                if first.ref_counter != 0:
+                    for n in deferred_reinsert:
+                        self.evict_tree_set.add(n)
+                    deferred_reinsert.clear()
+            if not self.evict_tree_set:
+                # No more distinct leaves for elastic; reinsert deferred truncated
+                # leaves so they can be considered for whole-leaf eviction if still needed.
+                # Their LRU recency was preserved (not promoted), so they remain coldest.
+                for n in deferred_reinsert:
+                    self.evict_tree_set.add(n)
+                deferred_reinsert.clear()
+                if not self.evict_tree_set:
+                    break
             node: TreeNode = self.evict_tree_set.pop(0)
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
             ), "error evict tree node state"
+            remaining = need_remove_tokens - num_evicted
+            node_len = len(node.token_mem_index_value)
+            # Elastic: if we only need a tail, shrink leaf and keep reusable prefix.
+            # Conditions: enabled, need < node_len, can retain at least min_retained,
+            # and per-leaf cap (persistent + per-call) not exhausted.
+            node_id = id(node)
+            already_this_call = elastically_used_this_call.get(node_id, 0)
+            can_elastic = (
+                self.enable_elastic_eviction
+                and remaining < node_len
+                and node_len > self.elastic_min_retained_tokens
+            )
+                # Enforce per-leaf per-step cap: at most cap tokens elastically
+            # reclaimed from this leaf within this evict() call. Advertised as
+            # per-step, not lifetime.
+            if can_elastic and self.elastic_max_evict_tokens_per_leaf is not None:
+                remaining_cap = self.elastic_max_evict_tokens_per_leaf - already_this_call
+                if remaining_cap <= 0:
+                    can_elastic = False
+
+            if can_elastic:
+                # Compute evict_len limited by remaining need, min_retained, and per-step cap.
+                max_by_retained = node_len - self.elastic_min_retained_tokens
+                evict_len = min(remaining, max_by_retained)
+                if self.elastic_max_evict_tokens_per_leaf is not None:
+                    remaining_cap = self.elastic_max_evict_tokens_per_leaf - already_this_call
+                    evict_len = min(evict_len, remaining_cap)
+                retain_len = node_len - evict_len
+                if evict_len <= 0 or retain_len < self.elastic_min_retained_tokens:
+                    can_elastic = False
+                # Avoid pointless trim: if elastic cannot fully satisfy remaining
+                # and other leaves cannot cover the remainder, the same leaf will
+                # be whole-evicted next, making the elastic clone wasteful.
+                # This covers both min_retained and per-step cap limits.
+                if can_elastic and evict_len < remaining:
+                    other_available = 0
+                    # Sum tokens in remaining evict set + deferred truncated leaves
+                    # (current node already popped, not counted)
+                    for n in self.evict_tree_set:
+                        other_available += len(n.token_mem_index_value)
+                    for n in deferred_reinsert:
+                        other_available += len(n.token_mem_index_value)
+                    if other_available < remaining - evict_len:
+                        # Not enough in others (considering both elastic and whole
+                        # from others); this leaf will be whole-evicted immediately
+                        # after trim, so skip elastic and do whole directly.
+                        # Note: we check if elastic was limited (by min_retained or cap)
+                        # — if evict_len == remaining, it fully satisfies need, not pointless.
+                        can_elastic = False
+
+                if can_elastic:
+                    # Split suffix to free, keep prefix in same node object.
+                    # Invariant: prefix remains contiguous from node.parent, children stays empty,
+                    # ref_counter stays 0, so match_prefix and future insert still work.
+                    # Avoid cloning suffix_key (unused) and clone prefix only once.
+                    suffix_value = node.token_mem_index_value[retain_len:]
+                    # Truncate leaf in-place to reusable prefix — single clone per tensor.
+                    # Clone creates new smaller allocation so old tail storage can be freed.
+                    node.token_id_key = node.token_id_key[:retain_len].clone()
+                    node.token_mem_index_value = node.token_mem_index_value[:retain_len].clone()
+                    node.node_value_len = retain_len
+                    # node_prefix_total_len stays parent_total + retain_len
+                    node.node_prefix_total_len = node.parent.node_prefix_total_len + retain_len
+                    # Track per-step usage; do not enforce lifetime cap.
+                    elastically_used_this_call[node_id] = already_this_call + evict_len
+                    # Rescore for new geometry without counting as reuse and without
+                    # refreshing LRU recency. The cold victim's prefix must stay cold;
+                    # promoting to MRU would make the next eviction incorrectly target
+                    # newer leaves. Defer reinsertion so same leaf is not immediately
+                    # reselected within this call, distributing across leaves.
+                    self.eviction_policy.on_elastic_truncate(node)
+                    deferred_reinsert.append(node)
+                    # Account and callback only for evicted tail
+                    num_evicted += evict_len
+                    self.tree_total_tokens_num.arr[0] -= evict_len
+                    evict_callback(suffix_value)
+                    continue
+
+            # Default: whole-leaf eviction (historical behavior)
             self.eviction_policy.on_evict(node)
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value)
@@ -382,6 +522,9 @@ class RadixCache:
             if parent_node.is_leaf():
                 self.evict_tree_set.add(parent_node)
 
+        # Reinsert any elastically truncated leaves deferred during this call.
+        for n in deferred_reinsert:
+            self.evict_tree_set.add(n)
         return
 
     def _try_merge(self, child_node: TreeNode) -> Optional[TreeNode]:
@@ -411,6 +554,10 @@ class RadixCache:
             [parent_node.token_mem_index_value, child_node.token_mem_index_value]
         )
         child_node.node_value_len = len(child_node.token_mem_index_value)
+        # Keep attribute for compatibility; per-step cap does not need merge logic.
+        child_node.elastic_evicted = max(
+            getattr(parent_node, "elastic_evicted", 0), getattr(child_node, "elastic_evicted", 0)
+        )
         self.eviction_policy.on_merge(parent_node, child_node)
 
         grandparent_node = parent_node.parent

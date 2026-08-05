@@ -112,6 +112,16 @@ class EvictionPolicy:
         """Hook invoked when ``child_node`` absorbs ``parent_node`` on merge."""
         return
 
+    def on_elastic_truncate(self, node) -> None:
+        """Hook invoked after a leaf is elastically truncated (tail reclaimed).
+
+        Must rescore geometry-dependent priority without counting as reuse
+        and, for LRU, must NOT refresh recency (time_id). The truncated leaf
+        was the cold victim; promoting it to MRU would incorrectly cause the
+        next eviction to target newer leaves.
+        """
+        return
+
 
 class LRUEvictionPolicy(EvictionPolicy):
     """
@@ -140,6 +150,12 @@ class LRUEvictionPolicy(EvictionPolicy):
 
     # on_split: default no-op -- LRU ordering (children count, time_id) is unaffected
     # by the geometry change, matching the original cache behavior exactly.
+
+    def on_elastic_truncate(self, node) -> None:
+        # Elastic truncation must NOT refresh LRU recency. The victim was the
+        # oldest leaf; its retained prefix should remain the oldest, not become
+        # MRU. No geometry-dependent priority to rescore for LRU.
+        return
 
     def on_merge(self, parent_node, child_node) -> None:
         child_node.time_id = max(parent_node.time_id, child_node.time_id)
@@ -208,6 +224,11 @@ class ComputeAwareGDSFEvictionPolicy(EvictionPolicy):
         # would let a write-back or a read-only probe improve a node's eviction
         # standing -- only a genuine reuse (record_reuse) or admission (init_node)
         # may do that.
+        node.priority = self.compute_priority(node)
+
+    def on_elastic_truncate(self, node) -> None:
+        # Elastic truncation: rescore for new geometry (size/cost changed) but
+        # preserve frozen age and recency. Same as touch_node for GDSF.
         node.priority = self.compute_priority(node)
 
     def record_reuse(self, node) -> None:

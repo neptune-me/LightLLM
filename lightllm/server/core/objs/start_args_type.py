@@ -97,6 +97,11 @@ class StartArgs:
     enable_prefill_decode_mixed: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
     radix_eviction_policy: str = field(default="lru", metadata={"choices": ["lru", "gdsf_compute"]})
+    # Elastic radix eviction: reclaim tail of cold leaves while preserving reusable prefix.
+    # Disabled by default to preserve historical whole-leaf behavior.
+    enable_elastic_radix_eviction: bool = field(default=False)
+    elastic_radix_min_retained_tokens: int = field(default=1)
+    elastic_radix_max_evict_tokens_per_leaf: Optional[int] = field(default=None)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)

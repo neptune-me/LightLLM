@@ -346,6 +346,26 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         policy that keeps prefixes which are expensive to recompute (quadratic prefill compute) and
         frequently reused.""",
     )
+    parser.add_argument(
+        "--enable_elastic_radix_eviction",
+        action="store_true",
+        help="""Enable elastic radix eviction: when evicting a cold leaf, reclaim only its tail
+        while preserving a reusable contiguous prefix. Disabled by default to preserve whole-leaf
+        eviction. Unsupported for LinearAttPagedRadixCache (hybrid linear-attention models):
+        enabling it with hybrid models will raise ValueError at startup; only standard RadixCache supports it.""",
+    )
+    parser.add_argument(
+        "--elastic_radix_min_retained_tokens",
+        type=int,
+        default=1,
+        help="Minimum tokens to retain on a leaf when using elastic eviction (default 1).",
+    )
+    parser.add_argument(
+        "--elastic_radix_max_evict_tokens_per_leaf",
+        type=int,
+        default=None,
+        help="Cap on tokens reclaimed from a single leaf per eviction step; None means up to leaf length.",
+    )
 
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
