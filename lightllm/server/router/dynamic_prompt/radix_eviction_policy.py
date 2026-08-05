@@ -241,8 +241,10 @@ class GDSFEvictionPolicy(EvictionPolicy):
         child.time_id = max(parent.time_id, child.time_id)
 
     def on_evict(self, node: "TreeNode") -> None:
-        # GDSF inflation: raise the floor to the evicted node's priority
-        self.aging_clock = max(self.aging_clock, self.priority(node))
+        # GDSF aging: set global clock to the last victim's priority directly
+        # (not max). GreedyDual inflation is defined as L = H(victim), where
+        # H is the priority at eviction time.
+        self.aging_clock = self.priority(node)
 
 
 _POLICIES = {
