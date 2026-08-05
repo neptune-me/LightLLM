@@ -165,6 +165,9 @@ class ModeBackend:
             self.radix_cache = None
         else:
             if self.is_linear_att_mixed_model:
+                # LinearAttPagedRadixCache 的节点按 page 对齐并绑定 linear att state buffer,
+                # 不支持弹性回收, 启动参数校验里已经拦截了这个组合。
+                assert not self.args.enable_elastic_radix_eviction
                 self.radix_cache = LinearAttPagedRadixCache(
                     unique_name=get_unique_server_name(),
                     total_token_num=self.model.mem_manager.size,
@@ -180,6 +183,8 @@ class ModeBackend:
                     total_token_num=self.model.mem_manager.size,
                     rank_in_node=self.rank_in_node,
                     mem_manager=self.model.mem_manager,
+                    enable_elastic_eviction=self.args.enable_elastic_radix_eviction,
+                    elastic_min_retain_tokens=self.args.elastic_radix_min_retain_tokens,
                 )
 
         if "prompt_cache_kv_buffer" in model_cfg:

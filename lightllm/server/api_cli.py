@@ -336,6 +336,22 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--use_dynamic_prompt_cache", action="store_true", help="This argument is deprecated and no longer in use."
     )
     parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
+    parser.add_argument(
+        "--enable_elastic_radix_eviction",
+        action="store_true",
+        help="""enable elastic radix cache eviction. By default the radix cache drops a whole cold leaf
+        even when only a few kv token slots are needed; with this on, the coldest leaf is truncated at its
+        tail so that its still reusable prefix stays in the tree. Not supported for linear attention hybrid
+        models, whose radix cache is page aligned.""",
+    )
+    parser.add_argument(
+        "--elastic_radix_min_retain_tokens",
+        type=int,
+        default=8,
+        help="""only used when --enable_elastic_radix_eviction is on. If truncating a cold leaf would leave
+        fewer than this many tokens on it, the whole leaf is evicted instead, so that the tree does not
+        accumulate prefix fragments that are too short to be worth reusing.""",
+    )
 
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")

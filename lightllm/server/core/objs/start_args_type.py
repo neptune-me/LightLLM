@@ -96,6 +96,8 @@ class StartArgs:
     disable_aggressive_schedule: bool = field(default=False)
     enable_prefill_decode_mixed: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
+    enable_elastic_radix_eviction: bool = field(default=False)
+    elastic_radix_min_retain_tokens: int = field(default=8)
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)

@@ -56,6 +56,31 @@ class TreeNode:
         self.node_prefix_total_len = self.parent.node_prefix_total_len + new_len
         return split_parent_node
 
+    def truncate_tail(self, keep_len: int) -> torch.Tensor:
+        """
+        弹性回收: 只丢弃本节点尾部的 token, 保留前 keep_len 个 token 组成的可复用前缀。
+        返回被释放的 token_mem_index_value 尾部切片。
+
+        只能从尾部裁: 本节点的起始偏移 (parent.node_prefix_total_len) 不变, 所以保留下来的
+        token 仍然处在它们原来的绝对位置上, 已经写入的 kv (含位置编码) 可以直接复用; 如果从
+        头部裁, 剩下的 token 位置就会与它们的 kv 对不上。
+
+        token_id_key 与 token_mem_index_value 必须同步裁剪, 否则 match 会命中
+        已经被释放的 kv 槽位。
+        """
+        assert self.is_leaf(), "only a leaf node can be truncated"
+        assert self.ref_counter == 0, "can not truncate a refed node"
+        assert 0 < keep_len < len(self.token_mem_index_value), f"bad keep_len {keep_len}"
+
+        freed_mem_index = self.token_mem_index_value[keep_len:]
+        self.token_id_key = self.token_id_key[0:keep_len]
+        self.token_mem_index_value = self.token_mem_index_value[0:keep_len]
+        self.node_value_len = keep_len
+        self.node_prefix_total_len = self.parent.node_prefix_total_len + keep_len
+        # 这里刻意不调用 update_time(): 被裁剪说明它是当前最冷的叶节点, 刷新时间会让它
+        # 伪装成热节点插到回收队列尾部, 下一次回收就要去动更热的数据。
+        return freed_mem_index
+
     def add_and_return_new_child(self, token_id_key, token_mem_index_value):
         child = TreeNode()
         child.token_id_key = token_id_key
@@ -103,13 +128,27 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
+    def __init__(
+        self,
+        unique_name,
+        total_token_num,
+        rank_in_node,
+        mem_manager=None,
+        enable_elastic_eviction: bool = False,
+        elastic_min_retain_tokens: int = 1,
+    ):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
+
+        assert elastic_min_retain_tokens >= 1, "elastic_min_retain_tokens must be >= 1"
 
         self.total_token_num = total_token_num
         self.mem_manager: MemoryManager = mem_manager
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
+        # 弹性回收: 回收时如果最冷的叶节点比实际需要的 token 数还大, 只裁掉它的尾部,
+        # 把仍然可复用的前缀留在树上, 默认关闭以保持原有的整叶节点回收行为。
+        self.enable_elastic_eviction = enable_elastic_eviction
+        self.elastic_min_retain_tokens = elastic_min_retain_tokens
 
         self.root_node = TreeNode()
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
@@ -333,6 +372,18 @@ class RadixCache:
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
             ), "error evict tree node state"
+
+            keep_len = len(node.token_mem_index_value) - (need_remove_tokens - num_evicted)
+            if self._can_elastic_evict(keep_len=keep_len):
+                freed_mem_index = node.truncate_tail(keep_len)
+                num_evicted += len(freed_mem_index)
+                evict_callback(freed_mem_index)
+                # update total token num
+                self.tree_total_tokens_num.arr[0] -= len(freed_mem_index)
+                # 节点被裁剪后仍然是一个可复用的叶节点, 放回回收队列。
+                self.evict_tree_set.add(node)
+                continue
+
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value)
             # update total token num
@@ -343,6 +394,18 @@ class RadixCache:
                 self.evict_tree_set.add(parent_node)
 
         return
+
+    def _can_elastic_evict(self, keep_len: int) -> bool:
+        """
+        keep_len 是把本次还缺的 token 全部从该叶节点尾部取走之后, 节点上还能留下的 token 数。
+        """
+        if not self.enable_elastic_eviction:
+            return False
+        # keep_len <= 0 说明整个节点都需要回收, 走原本的整节点回收路径。
+        if keep_len <= 0:
+            return False
+        # 留下来的前缀太短时复用价值很低, 却会在树里堆积碎片节点, 不如整节点回收。
+        return keep_len >= self.elastic_min_retain_tokens
 
     def _try_merge(self, child_node: TreeNode) -> Optional[TreeNode]:
         """

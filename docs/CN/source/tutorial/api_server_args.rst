@@ -247,6 +247,18 @@ PD 分离模式参数
 
     禁用kv cache 缓存
 
+.. option:: --enable_elastic_radix_eviction
+
+    开启 radix cache 的弹性回收。默认情况下，即使只需要少量 kv token 槽位，radix cache 也会把整个
+    冷叶节点删掉；开启后只会裁掉最冷叶节点的尾部，把它仍然可复用的前缀留在树上继续参与匹配。
+
+    linear attention 混合模型的 radix cache 按 page 对齐，不支持该功能。
+
+.. option:: --elastic_radix_min_retain_tokens
+
+    仅在开启 ``--enable_elastic_radix_eviction`` 时生效，默认为 ``8``。如果裁剪后叶节点上剩余的 token
+    数小于该值，则改为整节点回收，避免树中堆积过短、复用价值很低的前缀碎片。
+
 .. option:: --chunked_prefill_size
 
     分块预填充大小，默认为 ``4096``
