@@ -133,6 +133,17 @@ def _launch_subprocesses(args: StartArgs):
     if args.use_reward_model:
         assert args.disable_dynamic_prompt_cache is True, "need add --disable_dynamic_prompt_cache"
         assert args.disable_chunked_prefill is True, "need add --disable_chunked_prefill"
+    if args.enable_elastic_radix_eviction:
+        assert (
+            args.disable_dynamic_prompt_cache is False
+        ), "--enable_elastic_radix_eviction needs the dynamic prompt cache, remove --disable_dynamic_prompt_cache"
+        assert args.elastic_radix_min_retain_tokens >= 1, "--elastic_radix_min_retain_tokens must be >= 1"
+        # linear attention 混合模型使用 LinearAttPagedRadixCache: 节点按 page 对齐, 且每个 page
+        # 绑定了 linear attention 的 state buffer, 裁掉 page 尾部会破坏 page 对齐并让 state buffer
+        # 失效, 因此这类 cache 不支持弹性回收。
+        assert not is_linear_att_mixed_model(
+            args.model_dir
+        ), "--enable_elastic_radix_eviction does not support linear attention hybrid models"
     # FP8 KV cache mode checks
     if args.llm_kv_type in ["fp8kv_sph", "fp8kv_spt"]:
         assert (

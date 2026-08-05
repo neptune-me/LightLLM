@@ -250,6 +250,35 @@ Scheduling Parameters
 
     Disable kv cache caching
 
+.. option:: --radix_eviction_policy
+
+    Eviction policy for the radix prompt KV cache, default is ``lru``.
+
+    * ``lru``: evicts the oldest unreferenced prefix (the historical behavior).
+    * ``gdsf_compute``: a compute-aware Greedy-Dual-Size-Frequency policy that keeps prefixes which
+      are expensive to recompute (prefill attention is quadratic in sequence length) and frequently
+      reused, and drops cheap or cold ones.
+
+.. option:: --enable_elastic_radix_eviction
+
+    Enable elastic radix cache eviction. By default the radix cache drops a whole cold leaf even when
+    only a few kv token slots are needed. With this option on, the coldest leaf is truncated at its tail
+    so that its still reusable prefix stays in the tree and can be matched again.
+
+    Composes with ``--radix_eviction_policy``: the policy still chooses the victim, and this option only
+    changes how much is reclaimed from it. Under ``gdsf_compute`` the trimmed node is rescored from its
+    new span against its frozen aging baseline, so losing tokens never counts as a reuse, and the aging
+    clock only advances on whole-node eviction. In practice the two combine so that an expensive, hot
+    prefix is left untouched while the cheapest prefix is carved down gradually instead of vanishing.
+
+    Not supported for linear attention hybrid models, whose radix cache is page aligned.
+
+.. option:: --elastic_radix_min_retain_tokens
+
+    Only used together with ``--enable_elastic_radix_eviction``, default is ``8``. If truncating a cold
+    leaf would leave fewer than this many tokens on it, the whole leaf is evicted instead, so that the
+    tree does not accumulate prefix fragments that are too short to be worth reusing.
+
 .. option:: --chunked_prefill_size
 
     Chunked prefill size, default is ``4096``

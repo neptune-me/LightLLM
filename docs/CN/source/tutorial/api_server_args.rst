@@ -247,6 +247,31 @@ PD 分离模式参数
 
     禁用kv cache 缓存
 
+.. option:: --radix_eviction_policy
+
+    radix prompt KV cache 的回收策略，默认为 ``lru``。
+
+    * ``lru``: 优先回收最久未使用的未被引用前缀（原有行为）。
+    * ``gdsf_compute``: 计算感知的 Greedy-Dual-Size-Frequency 策略，倾向保留重算代价高
+      （prefill attention 的计算量与序列长度成平方关系）且被频繁复用的前缀，优先淘汰便宜或冷的前缀。
+
+.. option:: --enable_elastic_radix_eviction
+
+    开启 radix cache 的弹性回收。默认情况下，即使只需要少量 kv token 槽位，radix cache 也会把整个
+    冷叶节点删掉；开启后只会裁掉最冷叶节点的尾部，把它仍然可复用的前缀留在树上继续参与匹配。
+
+    与 ``--radix_eviction_policy`` 可以组合使用：受害者仍然由策略选出，本开关只改变从受害者身上
+    回收多少。在 ``gdsf_compute`` 下，被裁剪的节点会基于新的 span、按其冻结的 aging 基线重新打分，
+    因此"丢 token"不会被当成一次复用；aging clock 也只在整节点回收时推进。两者结合的效果是：
+    昂贵且热的前缀完全不受影响，最便宜的前缀被逐步裁短而不是整段消失。
+
+    linear attention 混合模型的 radix cache 按 page 对齐，不支持该功能。
+
+.. option:: --elastic_radix_min_retain_tokens
+
+    仅在开启 ``--enable_elastic_radix_eviction`` 时生效，默认为 ``8``。如果裁剪后叶节点上剩余的 token
+    数小于该值，则改为整节点回收，避免树中堆积过短、复用价值很低的前缀碎片。
+
 .. option:: --chunked_prefill_size
 
     分块预填充大小，默认为 ``4096``

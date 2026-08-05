@@ -20,6 +20,11 @@ responsible for three things:
                                and the original suffix. Both halves have new
                                geometry and must be rescored independently while
                                preserving the frozen age / frequency they inherit.
+* ``on_truncate(node)``     -- called when elastic eviction reclaims a node's tail
+                               and leaves its reusable prefix resident. Like
+                               ``on_split`` this is a geometry-only change: rescore
+                               from the new span, but never re-anchor age, grow
+                               frequency, or refresh recency.
 * ``on_evict(node)``        -- called when a node is evicted (lets aging policies
                                advance their global clock).
 * ``on_merge(parent, child)`` -- called when ``child`` absorbs ``parent`` during a
@@ -104,8 +109,23 @@ class EvictionPolicy:
         """
         return
 
+    def on_truncate(self, node) -> None:
+        """Hook invoked after elastic eviction trims ``node``'s tail.
+
+        The node stays resident with a shorter span, so this is a geometry-only
+        event: rescore if the key depends on geometry, but never re-anchor the
+        frozen age, grow frequency, or refresh recency. No-op for policies whose
+        key does not depend on geometry.
+        """
+        return
+
     def on_evict(self, node) -> None:
-        """Hook invoked when ``node`` is evicted. No-op for stateless policies."""
+        """Hook invoked when ``node`` is evicted. No-op for stateless policies.
+
+        Only fired for whole-node eviction. A node whose tail was trimmed by
+        elastic eviction is still in the cache, so it reports ``on_truncate``
+        instead and must not advance an aging clock.
+        """
         return
 
     def on_merge(self, parent_node, child_node) -> None:
@@ -140,6 +160,11 @@ class LRUEvictionPolicy(EvictionPolicy):
 
     # on_split: default no-op -- LRU ordering (children count, time_id) is unaffected
     # by the geometry change, matching the original cache behavior exactly.
+
+    # on_truncate: default no-op, and deliberately so. LRU's key does not depend on
+    # geometry, and refreshing time_id here would move the coldest leaf to the back
+    # of the queue just because we trimmed it -- the next eviction would then have to
+    # attack warmer data. A trimmed leaf must keep its place at the cold end.
 
     def on_merge(self, parent_node, child_node) -> None:
         child_node.time_id = max(parent_node.time_id, child_node.time_id)
@@ -225,11 +250,30 @@ class ComputeAwareGDSFEvictionPolicy(EvictionPolicy):
         prefix_node.priority = self.compute_priority(prefix_node)
         suffix_node.priority = self.compute_priority(suffix_node)
 
+    def on_truncate(self, node) -> None:
+        # Elastic eviction reclaimed the tail; the head is still resident. Geometry
+        # changed, so rescore against the FROZEN age -- exactly like on_split, and
+        # for the same reason: losing tokens is not a reuse and must not re-anchor
+        # the node's aging baseline, grow its frequency, or refresh its recency.
+        #
+        # Note the priority can only move down here. With
+        # cost/size == (e**2 - s**2) / (e - s) == e + s, trimming lowers the node's
+        # end depth ``e`` while its start depth ``s`` is fixed, so a trimmed node
+        # stays at (freq == 0) or below (freq > 0) the eviction floor and remains
+        # the next victim -- which is what we want, we keep carving the coldest
+        # prefix down rather than moving on to warmer data.
+        node.priority = self.compute_priority(node)
+
     def on_evict(self, node) -> None:
         # Classic GDSF inflation: set the aging clock to the evicted victim's
         # priority directly (L = H(victim)), NOT max(L, H) -- global_age must track
         # the last victim, which is monotonic non-decreasing whenever the true
         # minimum is evicted.
+        #
+        # Deliberately NOT fired for elastic truncation. The clock tracks objects
+        # that actually left the cache; a trimmed node is still resident. Firing it
+        # there would also break the monotonicity argument above, because a trimmed
+        # node is rescored strictly downwards and would drag L back down with it.
         self.global_age = node.priority
 
     def on_merge(self, parent_node, child_node) -> None:
