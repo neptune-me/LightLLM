@@ -340,15 +340,21 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
     parser.add_argument(
         "--radix_cache_eviction_policy",
         type=str,
-        choices=["lru", "gdsf"],
+        choices=["lru", "gdsf", "gdsf_compute"],
         default="lru",
         help="""eviction policy for the radix prompt cache. "lru" (default) evicts the
         least-recently-used unreferenced leaf. "gdsf" is an experimental size-aware LFU
         (Greedy-Dual-Size-Frequency) policy that scores nodes by
         aging_clock + freq / size ** size_exponent and evicts the lowest score,
-        favoring small, frequently reused prefixes. Only applies to the standard radix
-        cache; linear-attention (mamba mixed) models always use LRU and will warn if a
-        different policy is requested.""",
+        favoring small, frequently reused prefixes. "gdsf_compute" is the
+        compute-aware variant (aging_clock + freq * compute_cost / size **
+        size_exponent where compute_cost = L*(L+1)/2 for prefix length L,
+        i.e. quadratic prefill FLOPs because each new token attends over the
+        growing prefix); it keeps deeper/more expensive prefixes longer. The
+        flag --radix_cache_gdsf_compute_aware also enables compute-aware
+        scoring for "gdsf". Only applies to the standard radix cache;
+        linear-attention (mamba mixed) models always use LRU and will warn if
+        a different policy is requested.""",
     )
     parser.add_argument(
         "--radix_cache_gdsf_size_exponent",
@@ -357,6 +363,26 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         help="""GDSF only: exponent applied to node size in the priority denominator.
         1.0 is classic GDSF-Size (size-aware); 0.0 recovers a pure aged-LFU policy with
         no size awareness.""",
+    )
+    parser.add_argument(
+        "--radix_cache_gdsf_compute_aware",
+        action="store_true",
+        default=False,
+        help="""GDSF only: when enabled the eviction priority becomes
+        aging_clock + freq * compute_cost / size ** size_exponent where
+        compute_cost = L*(L+1)/2 for prefix length L (sum of growing
+        attention windows, O(L^2), proxy for prefill FLOPs). Deeper /
+        more expensive prefixes are therefore kept longer. Off by default
+        to preserve pure size-aware behaviour.""",
+    )
+    parser.add_argument(
+        "--radix_cache_gdsf_compute_weight",
+        type=float,
+        default=1.0,
+        help="""GDSF compute-aware only: exponent applied to quadratic compute_cost
+        (cost ** compute_weight). 1.0 keeps quadratic L*(L+1)/2 (default),
+        0.5 recovers linear O(L) for linear-attention, 2.0 is quartic.
+        Ignored when --radix_cache_gdsf_compute_aware is off.""",
     )
 
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")

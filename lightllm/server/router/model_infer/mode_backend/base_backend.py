@@ -189,6 +189,8 @@ class ModeBackend:
                     eviction_policy=self.args.radix_cache_eviction_policy,
                     eviction_policy_kwargs={
                         "size_exponent": self.args.radix_cache_gdsf_size_exponent,
+                        "compute_aware": self.args.radix_cache_gdsf_compute_aware,
+                        "compute_weight": self.args.radix_cache_gdsf_compute_weight,
                     },
                 )
 
