@@ -67,6 +67,19 @@ def test_priority_uses_frozen_age():
     assert policy.compute_priority(node) == pytest.approx(26.0)
 
 
+def test_priority_matches_canonical_formula_at_reuse():
+    # recompute_cost = end_depth**2 - start_depth**2
+    # priority       = global_age + frequency * recompute_cost / resident_tokens
+    policy = ComputeAwareGDSFEvictionPolicy()
+    policy.global_age = 12.0
+    # segment spanning depths [3, 8): end_depth=8, start_depth=3, resident_tokens=5
+    node = _FakeNode(node_prefix_total_len=8, node_value_len=5)
+    policy.record_reuse(node)  # frequency -> 1
+    expected = 12.0 + 1 * (8**2 - 3**2) / 5  # 12 + 55/5 = 23
+    assert node.priority == pytest.approx(expected)
+    assert node.priority == pytest.approx(23.0)
+
+
 def test_init_node_anchors_age_to_current_clock():
     policy = ComputeAwareGDSFEvictionPolicy()
     policy.global_age = 5.0

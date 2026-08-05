@@ -40,25 +40,31 @@ Two policies are provided:
   variant of Greedy-Dual-Size-Frequency. It keeps prefixes whose KV cache is
   expensive to recompute and frequently reused, and drops cheap / cold ones.
 
-GDSF priority of a node::
+GDSF priority of a node, scored at each genuine event (admission / reuse)::
 
-    priority = age + freq * recompute_cost / resident_tokens
+    recompute_cost = end_depth ** 2 - start_depth ** 2
+    priority       = global_age + frequency * recompute_cost / resident_tokens
 
 where
 
 * ``resident_tokens`` is the number of tokens the node occupies in KV memory
-  (its "size"),
+  (its "size", ``node_value_len``),
 * ``recompute_cost`` approximates the compute needed to regenerate this node's KV
-  cache. Prefill attention is quadratic in sequence length, so a node covering the
-  prefix span ``[start, end)`` costs ``end**2 - start**2`` -- the marginal
-  quadratic attention work of its own tokens given all preceding context,
-* ``freq`` is how often the node has genuinely been reused,
-* ``age`` is the node's *frozen* snapshot of the global aging clock, taken at its
-  last admission/reuse. Because it is stored per node, geometry-only events (a
-  split rescoring both halves) can re-derive priority from the current span
-  WITHOUT re-anchoring the age -- preserving the node's history. ``global_age`` is
-  the clock itself, advanced to the priority of the most recently evicted node; it
-  prevents a once-popular-but-now-cold node from lingering forever.
+  cache. Prefill attention is quadratic in sequence length, so a node spanning
+  prefix depths ``[start_depth, end_depth)`` costs ``end_depth**2 -
+  start_depth**2`` -- the marginal quadratic attention work of its own tokens
+  given all preceding context (``end_depth = node_prefix_total_len``,
+  ``start_depth = end_depth - node_value_len``),
+* ``frequency`` is how often the node has genuinely been reused,
+* ``global_age`` is the GDSF aging clock, advanced to the priority of the most
+  recently evicted node; it prevents a once-popular-but-now-cold node from
+  lingering forever.
+
+Each node also stores ``age``: the *frozen* snapshot of ``global_age`` taken when
+the priority above was last scored (admission / reuse). Storing it per node lets
+geometry-only events -- a split rescoring both halves, a merge -- re-derive
+priority from the new span using the SAME baseline, so they preserve the node's
+history instead of re-anchoring it to the current clock.
 """
 
 from typing import Tuple
@@ -157,33 +163,42 @@ class ComputeAwareGDSFEvictionPolicy(EvictionPolicy):
     @staticmethod
     def _recompute_cost(node) -> float:
         """
-        Marginal quadratic prefill/attention compute of this node's token span.
+        Marginal quadratic prefill/attention compute of this node's token span::
 
-        The node covers prefix positions ``[start, end)`` where
-        ``end = node_prefix_total_len`` and ``start = end - node_value_len``.
-        Attention prefill compute grows quadratically with position, so the work
-        attributable to this span is ``end**2 - start**2``.
+            recompute_cost = end_depth ** 2 - start_depth ** 2
+
+        The node covers prefix depths ``[start_depth, end_depth)`` where
+        ``end_depth = node_prefix_total_len`` and
+        ``start_depth = end_depth - node_value_len``. Attention prefill compute
+        grows quadratically with position, so the work attributable to this span is
+        ``end_depth**2 - start_depth**2``.
         """
-        end = node.node_prefix_total_len
-        start = end - node.node_value_len
-        return float(end * end - start * start)
+        end_depth = node.node_prefix_total_len
+        start_depth = end_depth - node.node_value_len
+        return float(end_depth * end_depth - start_depth * start_depth)
+
+    def _score(self, node, aging_baseline) -> float:
+        """priority = aging_baseline + frequency * recompute_cost / resident_tokens"""
+        resident_tokens = max(node.node_value_len, 1)
+        return aging_baseline + node.freq * self._recompute_cost(node) / resident_tokens
 
     def compute_priority(self, node) -> float:
-        # Derived from the node's CURRENT geometry and its FROZEN age baseline, so
-        # a geometry-only change (split) can be rescored without re-anchoring age.
-        resident_tokens = max(node.node_value_len, 1)
-        return node.age + node.freq * self._recompute_cost(node) / resident_tokens
+        # Rescore from CURRENT geometry against the node's FROZEN aging baseline, so
+        # a geometry-only change (split / merge) never re-anchors the age.
+        return self._score(node, node.age)
 
     def get_compare_key(self, node) -> Tuple:
         # Evict unreferenced nodes first, then lowest priority, oldest as tiebreak.
         return (0 if node.ref_counter == 0 else 1, node.priority, node.time_id)
 
     def init_node(self, node) -> None:
-        # Admission: anchor the aging baseline at the current clock. Not a reuse,
-        # so freq stays 0 -> priority == global_age (a prime eviction candidate
-        # until the node is genuinely reused).
+        # Admission scores at the current aging floor:
+        #   priority = global_age + frequency * recompute_cost / resident_tokens
+        # Not a reuse, so freq stays 0 -> priority == global_age (a prime eviction
+        # candidate until genuinely reused). Freeze global_age into node.age so later
+        # geometry-only rescoring (splits) preserves this baseline.
         node.age = self.global_age
-        node.priority = self.compute_priority(node)
+        node.priority = self._score(node, self.global_age)
 
     def touch_node(self, node) -> None:
         # Non-reuse bookkeeping (write-back / probe). Rescore for any geometry
@@ -195,12 +210,13 @@ class ComputeAwareGDSFEvictionPolicy(EvictionPolicy):
         node.priority = self.compute_priority(node)
 
     def record_reuse(self, node) -> None:
-        # Genuine prompt-cache hit: the only path that grows frequency. Re-anchor
-        # the aging baseline to the current clock (classic GDSF: H = L + f*c/s).
+        # Genuine prompt-cache hit: the only path that grows frequency. Re-anchor the
+        # aging baseline to the current clock and score with the canonical formula:
+        #   priority = global_age + frequency * recompute_cost / resident_tokens
         node.update_time()
         node.freq += 1
         node.age = self.global_age
-        node.priority = self.compute_priority(node)
+        node.priority = self._score(node, self.global_age)
 
     def on_split(self, prefix_node, suffix_node) -> None:
         # Split changes the geometry of both halves. Rescore each from its new span
