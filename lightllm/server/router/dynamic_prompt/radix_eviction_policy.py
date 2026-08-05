@@ -56,9 +56,9 @@ where
   given all preceding context (``end_depth = node_prefix_total_len``,
   ``start_depth = end_depth - node_value_len``),
 * ``frequency`` is how often the node has genuinely been reused,
-* ``global_age`` is the GDSF aging clock, advanced to the priority of the most
-  recently evicted node; it prevents a once-popular-but-now-cold node from
-  lingering forever.
+* ``global_age`` is the GDSF aging clock, set to the priority of the most recently
+  evicted node (``L = H(victim)``); it prevents a once-popular-but-now-cold node
+  from lingering forever.
 
 Each node also stores ``age``: the *frozen* snapshot of ``global_age`` taken when
 the priority above was last scored (admission / reuse). Storing it per node lets
@@ -157,7 +157,8 @@ class ComputeAwareGDSFEvictionPolicy(EvictionPolicy):
     name = "gdsf_compute"
 
     def __init__(self):
-        # GDSF aging clock (a.k.a. the "L" / inflation value). Monotonic.
+        # GDSF aging clock (a.k.a. the "L" / inflation value): the priority of the
+        # most recently evicted node.
         self.global_age: float = 0.0
 
     @staticmethod
@@ -225,8 +226,11 @@ class ComputeAwareGDSFEvictionPolicy(EvictionPolicy):
         suffix_node.priority = self.compute_priority(suffix_node)
 
     def on_evict(self, node) -> None:
-        # Advance the aging clock to the victim's priority (classic GDSF inflation).
-        self.global_age = max(self.global_age, node.priority)
+        # Classic GDSF inflation: set the aging clock to the evicted victim's
+        # priority directly (L = H(victim)), NOT max(L, H) -- global_age must track
+        # the last victim, which is monotonic non-decreasing whenever the true
+        # minimum is evicted.
+        self.global_age = node.priority
 
     def on_merge(self, parent_node, child_node) -> None:
         # The merged node keeps the richer history of the two, then is rescored for

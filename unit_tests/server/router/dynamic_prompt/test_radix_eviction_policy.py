@@ -134,7 +134,7 @@ def test_on_split_rescored_both_halves_from_new_geometry():
     assert suffix.priority == pytest.approx(2.0 + 3 * 84 / 6)  # 44
 
 
-def test_on_evict_advances_age_monotonically():
+def test_on_evict_sets_age_to_last_victim_priority():
     policy = ComputeAwareGDSFEvictionPolicy()
     policy.on_evict(_FakeNode(node_prefix_total_len=4, node_value_len=4))  # priority 0 default
     assert policy.global_age == 0.0
@@ -142,10 +142,12 @@ def test_on_evict_advances_age_monotonically():
     hot.priority = 50.0
     policy.on_evict(hot)
     assert policy.global_age == 50.0
+    # Classic GDSF assigns the LAST victim's priority directly (L = H(victim)),
+    # not a running max -- so a lower-priority victim lowers the clock.
     cold = _FakeNode(node_prefix_total_len=4, node_value_len=4)
     cold.priority = 5.0
     policy.on_evict(cold)
-    assert policy.global_age == 50.0  # a lower-priority victim does not roll it back
+    assert policy.global_age == 5.0
 
 
 def test_compare_key_orders_unreferenced_and_cheap_first():
