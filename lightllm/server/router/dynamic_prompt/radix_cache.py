@@ -34,7 +34,10 @@ class TreeNode:
 
         # Eviction-policy bookkeeping. Unused by the default LRU policy; the
         # compute-aware GDSF policy uses these to score eviction candidates.
+        # ``age`` is the frozen snapshot of the aging clock at the node's last
+        # admission/reuse, so geometry-only rescoring (splits) preserves history.
         self.freq = 0
+        self.age = 0.0
         self.priority = 0.0
 
     def get_compare_key(self):
@@ -49,9 +52,11 @@ class TreeNode:
         split_parent_node.children = {}
         split_parent_node.children[self.token_id_key[prefix_len].item()] = self
         split_parent_node.ref_counter = self.ref_counter
-        # The split prefix inherits the access history of the node it came from.
+        # The split prefix inherits the durable access history (frequency + frozen
+        # age) of the node it came from. Its priority is (re)scored by the policy's
+        # on_split hook, since its geometry differs from the pre-split node.
         split_parent_node.freq = self.freq
-        split_parent_node.priority = self.priority
+        split_parent_node.age = self.age
 
         new_len = len(split_parent_node.token_mem_index_value)
         split_parent_node.node_value_len = new_len
@@ -205,6 +210,8 @@ class RadixCache:
                         self.evict_tree_set.discard(child)
 
                     split_parent_node = child.split_node(prefix_len)
+                    # Both halves changed geometry: rescore each, preserving history.
+                    self.eviction_policy.on_split(split_parent_node, child)
 
                     if split_parent_node.is_leaf():
                         self.evict_tree_set.add(split_parent_node)
@@ -222,9 +229,11 @@ class RadixCache:
                 key = key[prefix_len:]
                 value = value[prefix_len:]
                 split_parent_node = child.split_node(prefix_len)
+                # Both halves changed geometry: rescore each, preserving history.
+                self.eviction_policy.on_split(split_parent_node, child)
                 new_node = split_parent_node.add_and_return_new_child(key, value)
-                # Admitting a brand-new node initializes bookkeeping, not reuse.
-                self.eviction_policy.touch_node(new_node)
+                # Admitting a brand-new node anchors its aging baseline, not reuse.
+                self.eviction_policy.init_node(new_node)
                 # update total token num
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
 
@@ -243,8 +252,8 @@ class RadixCache:
 
         else:
             new_node = node.add_and_return_new_child(key, value)
-            # Admitting a brand-new node initializes bookkeeping, not reuse.
-            self.eviction_policy.touch_node(new_node)
+            # Admitting a brand-new node anchors its aging baseline, not reuse.
+            self.eviction_policy.init_node(new_node)
             # update total token num
             self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
             if new_node.is_leaf():
@@ -330,6 +339,8 @@ class RadixCache:
                     self.evict_tree_set.discard(child)
 
                 split_parent_node = child.split_node(prefix_len)
+                # Both halves changed geometry: rescore each, preserving history.
+                self.eviction_policy.on_split(split_parent_node, child)
                 ans_value_list.append(split_parent_node.token_mem_index_value)
 
                 if update_refs:
@@ -337,6 +348,9 @@ class RadixCache:
                     # from 0 to 1 need update refs token num
                     if split_parent_node.ref_counter == 1:
                         self.refed_tokens_num.arr[0] += len(split_parent_node.token_mem_index_value)
+                    # A partial hit genuinely reuses the matched shared prefix. This
+                    # terminal node is not on the update_list, so count it here.
+                    self.eviction_policy.record_reuse(split_parent_node)
 
                 if child.is_leaf():
                     self.evict_tree_set.add(child)

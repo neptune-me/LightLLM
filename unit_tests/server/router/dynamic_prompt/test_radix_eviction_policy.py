@@ -20,6 +20,7 @@ class _FakeNode:
         self.time_id = time_id
         self.children = {}
         self.freq = 0
+        self.age = 0.0
         self.priority = 0.0
 
     def update_time(self):
@@ -56,36 +57,60 @@ def test_recompute_cost_is_quadratic_segment():
     assert policy._recompute_cost(node) == pytest.approx(25 - 4)
 
 
-def test_priority_formula():
+def test_priority_uses_frozen_age():
     policy = ComputeAwareGDSFEvictionPolicy()
-    policy.global_age = 10.0
+    policy.global_age = 999.0  # current clock must NOT leak into the score
     node = _FakeNode(node_prefix_total_len=8, node_value_len=8)  # cost 64, size 8
     node.freq = 2
-    # global_age + freq * cost / size = 10 + 2 * 64 / 8 = 26
+    node.age = 10.0  # frozen baseline
+    # age + freq * cost / size = 10 + 2 * 64 / 8 = 26
     assert policy.compute_priority(node) == pytest.approx(26.0)
 
 
-def test_record_reuse_increments_freq_and_sets_priority():
+def test_init_node_anchors_age_to_current_clock():
     policy = ComputeAwareGDSFEvictionPolicy()
+    policy.global_age = 5.0
+    node = _FakeNode(node_prefix_total_len=4, node_value_len=4)
+    policy.init_node(node)
+    assert node.freq == 0  # admission is not reuse
+    assert node.age == pytest.approx(5.0)  # anchored at the aging floor
+    assert node.priority == pytest.approx(5.0)  # 5 + 0
+
+
+def test_record_reuse_increments_freq_and_reanchors_age():
+    policy = ComputeAwareGDSFEvictionPolicy()
+    policy.global_age = 5.0
     node = _FakeNode(node_prefix_total_len=4, node_value_len=4)  # cost 16, size 4
     policy.record_reuse(node)
     assert node.freq == 1
-    assert node.priority == pytest.approx(4.0)  # 0 + 1 * 16 / 4
-    policy.record_reuse(node)
-    assert node.freq == 2
-    assert node.priority == pytest.approx(8.0)  # frequency reuse raises priority
+    assert node.age == pytest.approx(5.0)
+    assert node.priority == pytest.approx(9.0)  # 5 + 1 * 16 / 4
 
 
-def test_touch_node_does_not_increment_freq():
+def test_touch_node_preserves_frozen_age_and_freq():
     policy = ComputeAwareGDSFEvictionPolicy()
     policy.global_age = 7.0
     node = _FakeNode(node_prefix_total_len=4, node_value_len=4)  # cost 16, size 4
+    node.age = 3.0  # a frozen baseline from an earlier event
+    node.freq = 2
     policy.touch_node(node)
-    assert node.freq == 0
-    # With freq still 0 the compute term vanishes: priority is just the aging floor.
-    assert node.priority == pytest.approx(7.0)
-    policy.touch_node(node)
-    assert node.freq == 0  # repeated bookkeeping never inflates frequency
+    assert node.freq == 2  # bookkeeping never grows frequency
+    assert node.age == pytest.approx(3.0)  # frozen age is NOT re-anchored to 7.0
+    assert node.priority == pytest.approx(3.0 + 2 * 16 / 4)  # rescored from geometry
+
+
+def test_on_split_rescored_both_halves_from_new_geometry():
+    # Pre-split node had span [0, 10), age 2, freq 3. Split at 4 into prefix [0, 4)
+    # and suffix [4, 10). Both inherit age/freq; each is rescored from its own span.
+    policy = ComputeAwareGDSFEvictionPolicy()
+    policy.global_age = 100.0  # must not leak into either half
+    prefix = _FakeNode(node_prefix_total_len=4, node_value_len=4)  # cost 16, size 4
+    prefix.age, prefix.freq = 2.0, 3
+    suffix = _FakeNode(node_prefix_total_len=10, node_value_len=6)  # cost 84, size 6
+    suffix.age, suffix.freq = 2.0, 3
+    policy.on_split(prefix, suffix)
+    assert prefix.priority == pytest.approx(2.0 + 3 * 16 / 4)  # 14, not stale, not aged
+    assert suffix.priority == pytest.approx(2.0 + 3 * 84 / 6)  # 44
 
 
 def test_on_evict_advances_age_monotonically():
@@ -96,11 +121,10 @@ def test_on_evict_advances_age_monotonically():
     hot.priority = 50.0
     policy.on_evict(hot)
     assert policy.global_age == 50.0
-    # a later, lower-priority victim must not roll the clock back
     cold = _FakeNode(node_prefix_total_len=4, node_value_len=4)
     cold.priority = 5.0
     policy.on_evict(cold)
-    assert policy.global_age == 50.0
+    assert policy.global_age == 50.0  # a lower-priority victim does not roll it back
 
 
 def test_compare_key_orders_unreferenced_and_cheap_first():
@@ -118,31 +142,33 @@ def test_compare_key_orders_unreferenced_and_cheap_first():
 def test_zero_length_node_does_not_divide_by_zero():
     policy = ComputeAwareGDSFEvictionPolicy()
     root_like = _FakeNode(node_prefix_total_len=0, node_value_len=0)
-    # size clamps to 1, cost is 0 -> priority == global_age
+    # size clamps to 1, cost is 0 -> priority == frozen age (0 here)
     assert policy.compute_priority(root_like) == pytest.approx(0.0)
 
 
 # --------------------------------------------------------------------------------------
-# integration: frequency counts genuine reuse ONLY
+# integration helpers
 # --------------------------------------------------------------------------------------
 def _insert(tree, ids):
     return tree.insert(torch.tensor(ids, dtype=torch.int64, device="cpu"))
 
 
-def _reuse(tree, ids):
-    """Simulate a genuine prompt-cache hit: match with refs, then release them."""
-    node, _, _ = tree.match_prefix(torch.tensor(ids, dtype=torch.int64, device="cpu"), update_refs=True)
-    if node is not None:
+def _reuse(tree, ids, update_refs=True):
+    """Simulate a prompt-cache lookup; with update_refs it is a genuine hit."""
+    node, _, _ = tree.match_prefix(torch.tensor(ids, dtype=torch.int64, device="cpu"), update_refs=update_refs)
+    if node is not None and update_refs:
         tree.dec_node_ref_counter(node)
     return node
 
 
+# --------------------------------------------------------------------------------------
+# frequency counts genuine reuse ONLY (full and partial hits)
+# --------------------------------------------------------------------------------------
 def test_insertion_does_not_count_as_reuse():
     tree = RadixCache("gdsf_insert", 100, 0, eviction_policy="gdsf_compute")
     _, node = _insert(tree, [0, 1, 2])
-    assert node.freq == 0  # admitting a node is not reuse
-    # Re-inserting an extending sequence walks the shared prefix but must not bump freq.
-    _insert(tree, [0, 1, 2, 3, 4])
+    assert node.freq == 0
+    _insert(tree, [0, 1, 2, 3, 4])  # walks the shared prefix but must not bump freq
     assert tree.root_node.children[0].freq == 0
 
 
@@ -150,7 +176,7 @@ def test_readonly_probe_does_not_count_as_reuse():
     tree = RadixCache("gdsf_probe", 100, 0, eviction_policy="gdsf_compute")
     _, node = _insert(tree, [0, 1, 2])
     tree.match_prefix(torch.tensor([0, 1, 2], dtype=torch.int64, device="cpu"), update_refs=False)
-    assert node.freq == 0  # a read-only probe is not reuse
+    assert node.freq == 0
 
 
 def test_ref_bookkeeping_does_not_count_as_reuse():
@@ -158,26 +184,74 @@ def test_ref_bookkeeping_does_not_count_as_reuse():
     _, node = _insert(tree, [0, 1, 2])
     tree.add_node_ref_counter(node)
     tree.dec_node_ref_counter(node)
-    assert node.freq == 0  # pure reference-counter churn is not reuse
-
-
-def test_match_with_update_refs_counts_as_reuse():
-    tree = RadixCache("gdsf_reuse", 100, 0, eviction_policy="gdsf_compute")
-    _, node = _insert(tree, [0, 1, 2])
     assert node.freq == 0
 
-    matched, _, _ = tree.match_prefix(torch.tensor([0, 1, 2], dtype=torch.int64, device="cpu"), update_refs=True)
+
+def test_full_hit_counts_as_reuse():
+    tree = RadixCache("gdsf_full", 100, 0, eviction_policy="gdsf_compute")
+    _, node = _insert(tree, [0, 1, 2])
+    assert node.freq == 0
+    matched = _reuse(tree, [0, 1, 2])
     assert matched is node
     assert node.freq == 1
-    tree.dec_node_ref_counter(node)
-
-    tree.match_prefix(torch.tensor([0, 1, 2], dtype=torch.int64, device="cpu"), update_refs=True)
+    _reuse(tree, [0, 1, 2])
     assert node.freq == 2  # each genuine hit increments exactly once
-    tree.dec_node_ref_counter(node)
+
+
+def test_partial_hit_counts_as_reuse():
+    # A request matching a proper prefix of a resident node splits it; the matched
+    # shared-prefix half is a genuine reuse and must be counted.
+    tree = RadixCache("gdsf_partial", 100, 0, eviction_policy="gdsf_compute")
+    _insert(tree, [1, 2, 3, 4, 5])  # single resident node [1,2,3,4,5]
+    node = _reuse(tree, [1, 2, 3])  # partial hit -> split into [1,2,3] + [4,5]
+
+    shared_prefix = tree.root_node.children[1]
+    assert torch.equal(shared_prefix.token_id_key, torch.tensor([1, 2, 3], dtype=torch.int64))
+    assert node is shared_prefix
+    assert shared_prefix.freq == 1  # partial hit counted
+    # the unmatched suffix was NOT reused
+    suffix = shared_prefix.children[4]
+    assert torch.equal(suffix.token_id_key, torch.tensor([4, 5], dtype=torch.int64))
+    assert suffix.freq == 0
+
+
+def test_partial_probe_does_not_count_as_reuse():
+    tree = RadixCache("gdsf_partial_probe", 100, 0, eviction_policy="gdsf_compute")
+    _insert(tree, [1, 2, 3, 4, 5])
+    _reuse(tree, [1, 2, 3], update_refs=False)  # read-only partial probe -> splits
+    shared_prefix = tree.root_node.children[1]
+    assert torch.equal(shared_prefix.token_id_key, torch.tensor([1, 2, 3], dtype=torch.int64))
+    assert shared_prefix.freq == 0  # a probe, even a partial one, is not reuse
 
 
 # --------------------------------------------------------------------------------------
-# integration: LRU vs GDSF diverge, driven by genuine reuse
+# split rescoring: both halves reflect their new geometry, age stays frozen
+# --------------------------------------------------------------------------------------
+def test_split_rescored_both_halves_preserving_frozen_age():
+    tree = RadixCache("gdsf_split_rescore", 100, 0, eviction_policy="gdsf_compute")
+    _insert(tree, [1, 2, 3, 4, 5, 6, 7, 8])  # resident node spanning [0, 8)
+    # Reuse the whole node once so it has real history (freq=1, age=global_age=0).
+    whole = _reuse(tree, [1, 2, 3, 4, 5, 6, 7, 8])
+    assert whole.freq == 1
+    stale_priority = whole.priority  # cost 64, size 8 -> 0 + 1*8 = 8
+    assert stale_priority == pytest.approx(8.0)
+
+    # Now a read-only partial probe splits it at 3 into [1,2,3) and [3..8).
+    _reuse(tree, [1, 2, 3], update_refs=False)
+    prefix = tree.root_node.children[1]  # span [0, 3): cost 9, size 3
+    suffix = prefix.children[4]  # span [3, 8): cost 64-9=55, size 5
+
+    # Both inherit freq=1, age=0, and are rescored from their OWN geometry -- not
+    # left holding the pre-split node's stale priority of 8.
+    assert prefix.freq == 1 and suffix.freq == 1
+    assert prefix.priority == pytest.approx(0.0 + 1 * 9 / 3)  # 3.0
+    assert suffix.priority == pytest.approx(0.0 + 1 * 55 / 5)  # 11.0
+    assert prefix.priority != pytest.approx(stale_priority)
+    assert suffix.priority != pytest.approx(stale_priority)
+
+
+# --------------------------------------------------------------------------------------
+# integration: LRU vs GDSF, driven by genuine reuse
 # --------------------------------------------------------------------------------------
 def test_default_policy_is_lru():
     tree = RadixCache("gdsf_default", 100, 0)
@@ -185,22 +259,18 @@ def test_default_policy_is_lru():
 
 
 def test_lru_evicts_oldest_expensive_branch():
-    # Insert the long/expensive branch FIRST (oldest), the short/cheap one SECOND.
     tree = RadixCache("lru_case", 100, 0, eviction_policy="lru")
     _insert(tree, [10, 11, 12, 13, 14, 15, 16, 17])  # branch B: 8 tokens, older
     _insert(tree, [0, 1, 2])  # branch A: 3 tokens, newer
     assert tree.get_tree_total_tokens_num() == 11
 
     tree.evict(3, lambda mem: None)
-    # LRU drops the OLDEST leaf (the expensive branch B), keeping the newer cheap A.
-    assert 10 not in tree.root_node.children
+    assert 10 not in tree.root_node.children  # oldest (expensive) evicted
     assert 0 in tree.root_node.children
     assert tree.get_tree_total_tokens_num() == 3
 
 
 def test_gdsf_keeps_expensive_branch_evicts_cheap():
-    # Both branches are genuinely reused once; compute-aware GDSF then keeps the
-    # branch that is expensive to recompute and drops the cheap one.
     tree = RadixCache("gdsf_case", 100, 0, eviction_policy="gdsf_compute")
     _insert(tree, [10, 11, 12, 13, 14, 15, 16, 17])  # branch B: cost 64/8 = 8
     _insert(tree, [0, 1, 2])  # branch A: cost 9/3 = 3
@@ -216,7 +286,6 @@ def test_gdsf_keeps_expensive_branch_evicts_cheap():
 
 
 def test_gdsf_frequency_protects_reused_prefix():
-    # A cheap prefix reused many times outranks a costlier prefix reused once.
     tree = RadixCache("gdsf_freq", 100, 0, eviction_policy="gdsf_compute")
     _insert(tree, [0, 1, 2])  # A: per-hit cost/size = 9/3 = 3
     _insert(tree, [10, 11, 12, 13, 14])  # B: per-hit cost/size = 25/5 = 5
@@ -227,12 +296,10 @@ def test_gdsf_frequency_protects_reused_prefix():
 
     tree.evict(3, lambda mem: None)
     assert 0 in tree.root_node.children  # frequently reused cheap prefix survives
-    assert 10 not in tree.root_node.children  # cold-ish costly prefix evicted
+    assert 10 not in tree.root_node.children
 
 
 def test_gdsf_never_reused_nodes_fall_back_to_recency():
-    # With no genuine reuse, every node has freq 0 (priority == aging floor), so
-    # GDSF orders purely by recency -- like LRU -- and evicts the oldest.
     tree = RadixCache("gdsf_norefuse", 100, 0, eviction_policy="gdsf_compute")
     _insert(tree, [10, 11, 12, 13, 14, 15, 16, 17])  # older, expensive
     _insert(tree, [0, 1, 2])  # newer, cheap
@@ -245,8 +312,6 @@ def test_gdsf_never_reused_nodes_fall_back_to_recency():
 
 
 def test_gdsf_existing_radix_semantics_preserved():
-    # The structural cache behavior (prefix matching, token accounting, full evict)
-    # must be identical under GDSF; only eviction ORDER changes.
     tree = RadixCache("gdsf_semantics", 100, 0, eviction_policy="gdsf_compute")
     ans, _ = tree.insert(torch.tensor([0, 1, 2, 3, 4, 5, 6, 7, 8, 9], dtype=torch.int64))
     assert ans == 0
