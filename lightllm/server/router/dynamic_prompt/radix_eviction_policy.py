@@ -66,23 +66,25 @@ class LRUEvictionPolicy(EvictionPolicy):
 
 
 class GDSFEvictionPolicy(EvictionPolicy):
-    """Experimental GDSF-style size-aware LFU policy.
+    """Experimental GDSF-style size-aware LFU policy with optional compute-aware aging.
 
     Each node stores a *frozen* access clock (``_gdsf_clock``) captured at its
     last access and an access frequency (``_gdsf_freq``). Its priority is::
 
         priority = _gdsf_clock + _gdsf_freq / size ** size_exponent
 
-    for the size-aware variant, or::
+    for the size-aware variant, or (when ``compute_aware`` is enabled)::
 
-        priority = _gdsf_clock + _gdsf_freq * cost / size ** size_exponent
+        priority = global_age + frequency * recompute_cost / resident_tokens
 
-    when ``compute_aware`` is enabled, where ``cost`` is the quadratic
-    prefill cost ``L*(L+1)/2`` for a prefix of length ``L =
+    where ``recompute_cost = L*(L+1)/2`` for a prefix of length ``L =
     node.node_prefix_total_len`` (``sum_{i=1}^{L} i`` because each new token
-    attends over the growing prefix, i.e. ``O(L^2)``). Deeper prefixes are
-    therefore disproportionately more expensive to recompute and rank higher
-    (evicted later).
+    attends over the growing prefix, i.e. ``O(L^2)`` total prefill work),
+    ``resident_tokens`` is the node's token count (``size``), ``frequency``
+    is ``_gdsf_freq`` and ``global_age`` is the node's frozen
+    ``_gdsf_clock`` (global ``aging_clock`` at last access). Deeper prefixes
+    are therefore disproportionately more expensive to recompute and rank
+    higher (evicted later).
 
     The global ``aging_clock`` is bumped to the priority of every evicted node,
     so newly created / reaccessed nodes inherit a rising floor (classic GDSF
@@ -173,20 +175,20 @@ class GDSFEvictionPolicy(EvictionPolicy):
         return float(prefix * (prefix + 1) // 2)
 
     def priority(self, node: "TreeNode") -> float:
+        # Non-compute-aware GDSF: clock + freq / size**exp
+        # Compute-aware GDSF (requested): priority = global_age + frequency * recompute_cost / resident_tokens
+        # where recompute_cost is quadratic L*(L+1)/2 and resident_tokens is node size.
+        # global_age is the per-node frozen aging_clock (node._gdsf_clock).
         size = self._size(node)
-        base = node._gdsf_clock + node._gdsf_freq / (size ** self.size_exponent)
         if not self.compute_aware:
-            return base
-        # compute-aware: scale by per-node compute cost
-        cost = self._compute_cost(node)
+            return node._gdsf_clock + node._gdsf_freq / (size ** self.size_exponent)
+        # compute-aware: use exact requested formula
+        resident_tokens = size  # tokens resident in this node
+        recompute_cost = self._compute_cost(node)  # quadratic L*(L+1)/2
         if self.compute_weight != 1.0:
-            # exponentiate cost to allow quadratic modelling (cost^w)
-            cost = cost ** self.compute_weight
-        # When compute-aware, the classic GDSF numerator is freq * cost.
-        # We keep the same aging_clock semantics: clock + freq*cost / size^exp
-        # For backward compatibility the non-compute path is clock + freq/size^exp
-        # which equals the above with cost=1.
-        return node._gdsf_clock + (node._gdsf_freq * cost) / (size ** self.size_exponent)
+            recompute_cost = recompute_cost ** self.compute_weight
+        # GDSF aging: global_age (node._gdsf_clock) + freq * recompute_cost / resident_tokens
+        return node._gdsf_clock + (node._gdsf_freq * recompute_cost) / resident_tokens
 
     def compare_key(self, node: "TreeNode") -> Tuple:
         # keep the structural (ref, children) prefix; final time_id breaks ties
