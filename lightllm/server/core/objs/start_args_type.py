@@ -96,6 +96,7 @@ class StartArgs:
     disable_aggressive_schedule: bool = field(default=False)
     enable_prefill_decode_mixed: bool = field(default=False)
     disable_dynamic_prompt_cache: bool = field(default=False)
+    radix_eviction_policy: str = field(default="lru", metadata={"choices": ["lru", "gdsf_compute"]})
     chunked_prefill_size: int = field(default=None)
     disable_chunked_prefill: bool = field(default=False)
     diverse_mode: bool = field(default=False)

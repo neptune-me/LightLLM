@@ -5,6 +5,7 @@ import collections
 from typing import Tuple, Dict, Set, List, Optional, Union
 from sortedcontainers import SortedSet
 from .shared_arr import SharedArray
+from .radix_eviction_policy import get_eviction_policy
 
 
 class UniqueTimeIdGenerator:
@@ -31,6 +32,11 @@ class TreeNode:
         self.node_value_len = 0
         self.node_prefix_total_len = 0
 
+        # Eviction-policy bookkeeping. Unused by the default LRU policy; the
+        # compute-aware GDSF policy uses these to score eviction candidates.
+        self.freq = 0
+        self.priority = 0.0
+
     def get_compare_key(self):
         return (0 if self.ref_counter == 0 else 1, len(self.children), self.time_id)
 
@@ -43,6 +49,9 @@ class TreeNode:
         split_parent_node.children = {}
         split_parent_node.children[self.token_id_key[prefix_len].item()] = self
         split_parent_node.ref_counter = self.ref_counter
+        # The split prefix inherits the access history of the node it came from.
+        split_parent_node.freq = self.freq
+        split_parent_node.priority = self.priority
 
         new_len = len(split_parent_node.token_mem_index_value)
         split_parent_node.node_value_len = new_len
@@ -103,7 +112,7 @@ class RadixCache:
     unique_name 主要用于解决单机，多实列部署时的shm冲突
     """
 
-    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None):
+    def __init__(self, unique_name, total_token_num, rank_in_node, mem_manager=None, eviction_policy="lru"):
         from lightllm.common.kv_cache_mem_manager import MemoryManager
 
         self.total_token_num = total_token_num
@@ -111,12 +120,17 @@ class RadixCache:
         self._key_dtype = torch.int64
         self._value_dtype = torch.int64
 
+        # Pluggable eviction policy. Defaults to "lru" (the historical behavior);
+        # "gdsf_compute" enables the optional compute-aware GDSF policy.
+        self.eviction_policy = get_eviction_policy(eviction_policy)
+
         self.root_node = TreeNode()
         self.root_node.token_id_key = torch.zeros((0,), device="cpu", dtype=self._key_dtype)
         self.root_node.token_mem_index_value = torch.zeros((0,), device="cpu", dtype=self._value_dtype)
         self.root_node.ref_counter = 1  # 初始化为 1 保证永远不会被 evict 掉
 
-        self.evict_tree_set: Set[TreeNode] = SortedSet(key=lambda x: x.get_compare_key())  # 自定义比较器
+        # 自定义比较器: eviction order is delegated to the policy.
+        self.evict_tree_set: Set[TreeNode] = SortedSet(key=lambda x: self.eviction_policy.get_compare_key(x))
         self.evict_tree_set.add(self.root_node)
 
         self.refed_tokens_num = SharedArray(f"{unique_name}_refed_tokens_num_{rank_in_node}", (1,), dtype=np.int64)
@@ -158,7 +172,7 @@ class RadixCache:
 
         while len(update_list) != 0:
             cur_node: TreeNode = update_list.pop()
-            cur_node.update_time()
+            self.eviction_policy.update_node(cur_node)
             if cur_node.is_leaf():
                 self.evict_tree_set.add(cur_node)
 
@@ -180,7 +194,7 @@ class RadixCache:
                 if prefix_len == len(child.token_id_key):
                     if child.is_leaf():
                         self.evict_tree_set.discard(child)
-                    child.update_time()
+                    self.eviction_policy.update_node(child)
                     if child.is_leaf():
                         self.evict_tree_set.add(child)
                     return prefix_len, child
@@ -207,6 +221,7 @@ class RadixCache:
                 value = value[prefix_len:]
                 split_parent_node = child.split_node(prefix_len)
                 new_node = split_parent_node.add_and_return_new_child(key, value)
+                self.eviction_policy.update_node(new_node)
                 # update total token num
                 self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
 
@@ -225,6 +240,7 @@ class RadixCache:
 
         else:
             new_node = node.add_and_return_new_child(key, value)
+            self.eviction_policy.update_node(new_node)
             # update total token num
             self.tree_total_tokens_num.arr[0] += len(new_node.token_mem_index_value)
             if new_node.is_leaf():
@@ -270,7 +286,7 @@ class RadixCache:
 
         while len(update_list) != 0:
             cur_node: TreeNode = update_list.pop()
-            cur_node.update_time()
+            self.eviction_policy.update_node(cur_node)
             if cur_node.is_leaf():
                 self.evict_tree_set.add(cur_node)
 
@@ -333,6 +349,7 @@ class RadixCache:
             assert (
                 node.ref_counter == 0 and len(node.children) == 0 and node != self.root_node
             ), "error evict tree node state"
+            self.eviction_policy.on_evict(node)
             num_evicted += len(node.token_mem_index_value)
             evict_callback(node.token_mem_index_value)
             # update total token num
@@ -371,7 +388,7 @@ class RadixCache:
             [parent_node.token_mem_index_value, child_node.token_mem_index_value]
         )
         child_node.node_value_len = len(child_node.token_mem_index_value)
-        child_node.time_id = max(parent_node.time_id, child_node.time_id)
+        self.eviction_policy.on_merge(parent_node, child_node)
 
         grandparent_node = parent_node.parent
         key_in_grandparent = parent_node.token_id_key[0].item()

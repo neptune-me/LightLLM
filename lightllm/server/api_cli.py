@@ -336,6 +336,16 @@ def add_cli_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         "--use_dynamic_prompt_cache", action="store_true", help="This argument is deprecated and no longer in use."
     )
     parser.add_argument("--disable_dynamic_prompt_cache", action="store_true", help="disable dynamic prompt cache")
+    parser.add_argument(
+        "--radix_eviction_policy",
+        type=str,
+        choices=["lru", "gdsf_compute"],
+        default="lru",
+        help="""eviction policy for the radix prompt KV cache. 'lru' (default) evicts the oldest
+        unreferenced prefix. 'gdsf_compute' enables an optional compute-aware Greedy-Dual-Size-Frequency
+        policy that keeps prefixes which are expensive to recompute (quadratic prefill compute) and
+        frequently reused.""",
+    )
 
     parser.add_argument("--chunked_prefill_size", type=int, default=None, help="chunked prefill size")
     parser.add_argument("--disable_chunked_prefill", action="store_true", help="whether to disable chunked prefill")
